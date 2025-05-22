@@ -2,12 +2,12 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "5.38.0"
+      version = "6.12.0"
     }
   }
 }
 
 provider "google" {
-  project = "custom-ground-424107-q4"
+  project = "orbital-bee-455915-h5"
   region  = "us-central1"
 }
