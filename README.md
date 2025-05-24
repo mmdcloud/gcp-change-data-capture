@@ -1,5 +1,8 @@
 # GCP Change Data Capture Pipeline
 
+[![Terraform](https://img.shields.io/badge/terraform-%235835CC.svg?style=for-the-badge&logo=terraform&logoColor=white)](https://www.terraform.io/)
+[![Google Cloud](https://img.shields.io/badge/GoogleCloud-%234285F4.svg?style=for-the-badge&logo=google-cloud&logoColor=white)](https://cloud.google.com/)
+
 A real-time data replication pipeline that captures Change Data Capture (CDC) events from Cloud SQL MySQL database using Datastream and streams them into BigQuery for analytics and data warehousing.
 
 ## Architecture
