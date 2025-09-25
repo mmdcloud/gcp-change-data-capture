@@ -1,5 +1,31 @@
+
+# --------------------------------------------------------------------------
+# Getting Project Information
+# --------------------------------------------------------------------------
+data "google_project" "project" {}
+
+# --------------------------------------------------------------------------
+# Registering Vault Provider
+# --------------------------------------------------------------------------
+data "vault_generic_secret" "sql" {
+  path = "secret/sql"
+}
+
+# --------------------------------------------------------------------------
+# Secret Manager
+# --------------------------------------------------------------------------
+module "sql_password_secret" {
+  source      = "./modules/secret-manager"
+  secret_data = tostring(data.vault_generic_secret.sql.data["password"])
+  secret_id   = "db_password_secret"
+}
+
+# --------------------------------------------------------------------------
+# Cloud SQL Configuration
+# --------------------------------------------------------------------------
+
 resource "google_sql_database_instance" "mysql" {
-  name             = "mysql"
+  name             = "encodedmadmaxcloudsql8442241500"
   root_password    = "12345678"
   database_version = "MYSQL_8_0"
   region           = var.region
@@ -61,18 +87,14 @@ resource "google_sql_user" "user" {
   name     = "mohit"
   instance = google_sql_database_instance.mysql.name
   host     = "%"
-  password = "12345678"
+  password = module.sql_password_secret.secret_data
 }
 
-# Wait for the database instance to be ready
-resource "time_sleep" "wait_for_db" {
-  depends_on      = [google_sql_database_instance.mysql]
-  create_duration = "60s"
-}
+# --------------------------------------------------------------------------
+# Datastream configuration (CDC)
+# --------------------------------------------------------------------------
 
-resource "google_datastream_connection_profile" "source_connection_profile" {
-  depends_on = [time_sleep.wait_for_db]
-
+resource "google_datastream_connection_profile" "source_connection_profile" {  
   display_name          = "Source connection profile"
   location              = var.region
   connection_profile_id = "source-profile"
@@ -83,6 +105,7 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
     username = google_sql_user.user.name
     password = google_sql_user.user.password
   }
+  depends_on = [ google_sql_database_instance.mysql ]
 }
 
 data "google_bigquery_default_service_account" "bq_sa" {}
@@ -104,13 +127,15 @@ resource "google_bigquery_dataset" "target_dataset" {
   labels = {
     source = "datastream"
   }
+  depends_on = [ google_sql_database_instance.mysql ]
 }
 
 resource "google_datastream_stream" "default" {
   depends_on = [
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
-    google_bigquery_dataset.target_dataset
+    google_bigquery_dataset.target_dataset,
+    google_sql_database_instance.mysql 
   ]
 
   stream_id    = "demo-stream"
