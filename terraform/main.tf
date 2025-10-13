@@ -1,4 +1,3 @@
-
 # --------------------------------------------------------------------------
 # Getting Project Information
 # --------------------------------------------------------------------------
@@ -23,7 +22,6 @@ module "sql_password_secret" {
 # --------------------------------------------------------------------------
 # Cloud SQL Configuration
 # --------------------------------------------------------------------------
-
 resource "google_sql_database_instance" "mysql" {
   name             = "encodedmadmaxcloudsql8442241500"
   root_password    = "12345678"
@@ -80,7 +78,7 @@ resource "google_sql_database_instance" "mysql" {
 
 resource "google_sql_database" "db" {
   instance = google_sql_database_instance.mysql.name
-  name     = "demo"
+  name     = "db"
 }
 
 resource "google_sql_user" "user" {
@@ -93,7 +91,6 @@ resource "google_sql_user" "user" {
 # --------------------------------------------------------------------------
 # Datastream configuration (CDC)
 # --------------------------------------------------------------------------
-
 resource "google_datastream_connection_profile" "source_connection_profile" {  
   display_name          = "Source connection profile"
   location              = var.region
@@ -120,7 +117,7 @@ resource "google_datastream_connection_profile" "destination_connection_profile"
 
 # Create the target dataset first
 resource "google_bigquery_dataset" "target_dataset" {
-  dataset_id  = "dp_demo"
+  dataset_id  = "dp_bigquery"
   location    = var.region
   description = "Dataset for Datastream replication"
 
@@ -130,17 +127,16 @@ resource "google_bigquery_dataset" "target_dataset" {
   depends_on = [ google_sql_database_instance.mysql ]
 }
 
-resource "google_datastream_stream" "default" {
+resource "google_datastream_stream" "stream" {
   depends_on = [
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
     google_bigquery_dataset.target_dataset,
     google_sql_database_instance.mysql 
   ]
-
-  stream_id    = "demo-stream"
+  stream_id    = "db-stream"
   location     = var.region
-  display_name = "demo-stream"
+  display_name = "db-stream"
 
   # Start with PAUSED state for initial validation
   desired_state = "RUNNING"
