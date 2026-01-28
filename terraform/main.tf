@@ -91,7 +91,7 @@ resource "google_sql_user" "user" {
 # --------------------------------------------------------------------------
 # Datastream configuration (CDC)
 # --------------------------------------------------------------------------
-resource "google_datastream_connection_profile" "source_connection_profile" {  
+resource "google_datastream_connection_profile" "source_connection_profile" {
   display_name          = "Source connection profile"
   location              = var.region
   connection_profile_id = "source-profile"
@@ -102,7 +102,7 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
     username = google_sql_user.user.name
     password = google_sql_user.user.password
   }
-  depends_on = [ google_sql_database_instance.mysql ]
+  depends_on = [google_sql_database_instance.mysql]
 }
 
 data "google_bigquery_default_service_account" "bq_sa" {}
@@ -124,7 +124,7 @@ resource "google_bigquery_dataset" "target_dataset" {
   labels = {
     source = "datastream"
   }
-  depends_on = [ google_sql_database_instance.mysql ]
+  depends_on = [google_sql_database_instance.mysql]
 }
 
 resource "google_datastream_stream" "stream" {
@@ -132,7 +132,7 @@ resource "google_datastream_stream" "stream" {
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
     google_bigquery_dataset.target_dataset,
-    google_sql_database_instance.mysql 
+    google_sql_database_instance.mysql
   ]
   stream_id    = "db-stream"
   location     = var.region
