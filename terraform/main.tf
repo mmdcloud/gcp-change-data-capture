@@ -1,7 +1,8 @@
 # --------------------------------------------------------------------------
-# Getting Project Information
+# Data resource blocks
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
+data "google_bigquery_default_service_account" "bq_sa" {}
 
 # --------------------------------------------------------------------------
 # Registering Vault Provider
@@ -22,9 +23,58 @@ module "sql_password_secret" {
 # --------------------------------------------------------------------------
 # Cloud SQL Configuration
 # --------------------------------------------------------------------------
+module "mysql" {
+  source = "./modules/cloudsql-sql"
+
+  project_id    = var.project_id
+  region        = var.region
+  instance_name = "encodedmadmaxcloudsql"
+
+  tier              = "db-f1-micro"
+  edition           = "ENTERPRISE"
+  availability_type = "ZONAL"
+  disk_size         = 10
+
+  # Public IP + Datastream authorized networks, same as the original.
+  ipv4_enabled = true
+  authorized_networks = [
+    { name = "datastream-1", value = "34.71.242.81" },
+    { name = "datastream-2", value = "34.72.28.29" },
+    { name = "datastream-3", value = "34.67.6.157" },
+    { name = "datastream-4", value = "34.67.234.134" },
+    { name = "datastream-5", value = "34.72.239.218" },
+  ]
+
+  backup_enabled                 = true
+  binary_log_enabled             = true
+  backup_start_time              = "02:00"
+  transaction_log_retention_days = 7
+
+  # Original had this off; module defaults it on since query insights are
+  # essentially free and valuable for prod debugging. Uncomment to match
+  # the original behavior exactly:
+  # query_insights_enabled = false
+
+  databases = ["db"]
+
+  users = {
+    mohit = {
+      host = "%"
+      # password omitted -> randomly generated, returned in outputs
+    }
+  }
+
+  # Prod default is true; the original set this false, so we override
+  # explicitly here to preserve the same behavior.
+  deletion_protection = false
+
+  store_passwords_in_secret_manager = true
+}
+
+
 resource "google_sql_database_instance" "mysql" {
   name             = "encodedmadmaxcloudsql8442241500"
-  root_password    = "12345678"
+  root_password    = module.sql_password_secret.secret_data
   database_version = "MYSQL_8_0"
   region           = var.region
 
@@ -105,8 +155,6 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
   depends_on = [google_sql_database_instance.mysql]
 }
 
-data "google_bigquery_default_service_account" "bq_sa" {}
-
 resource "google_datastream_connection_profile" "destination_connection_profile" {
   display_name          = "Destination connection profile"
   location              = var.region
@@ -128,12 +176,6 @@ resource "google_bigquery_dataset" "target_dataset" {
 }
 
 resource "google_datastream_stream" "stream" {
-  depends_on = [
-    google_datastream_connection_profile.source_connection_profile,
-    google_datastream_connection_profile.destination_connection_profile,
-    google_bigquery_dataset.target_dataset,
-    google_sql_database_instance.mysql
-  ]
   stream_id    = "db-stream"
   location     = var.region
   display_name = "db-stream"
@@ -180,4 +222,10 @@ resource "google_datastream_stream" "stream" {
 
   # Use backfill_all for initial data load
   backfill_all {}
+  depends_on = [
+    google_datastream_connection_profile.source_connection_profile,
+    google_datastream_connection_profile.destination_connection_profile,
+    google_bigquery_dataset.target_dataset,
+    google_sql_database_instance.mysql
+  ]
 }
