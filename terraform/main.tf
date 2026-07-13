@@ -23,53 +23,53 @@ module "sql_password_secret" {
 # --------------------------------------------------------------------------
 # Cloud SQL Configuration
 # --------------------------------------------------------------------------
-module "mysql" {
-  source = "./modules/cloudsql-sql"
+# module "mysql" {
+#   source = "./modules/cloudsql-sql"
 
-  project_id    = var.project_id
-  region        = var.region
-  instance_name = "encodedmadmaxcloudsql"
+#   project_id    = var.project_id
+#   region        = var.region
+#   instance_name = "encodedmadmaxcloudsql"
 
-  tier              = "db-f1-micro"
-  edition           = "ENTERPRISE"
-  availability_type = "ZONAL"
-  disk_size         = 10
+#   tier              = "db-f1-micro"
+#   edition           = "ENTERPRISE"
+#   availability_type = "ZONAL"
+#   disk_size         = 10
 
-  # Public IP + Datastream authorized networks, same as the original.
-  ipv4_enabled = true
-  authorized_networks = [
-    { name = "datastream-1", value = "34.71.242.81" },
-    { name = "datastream-2", value = "34.72.28.29" },
-    { name = "datastream-3", value = "34.67.6.157" },
-    { name = "datastream-4", value = "34.67.234.134" },
-    { name = "datastream-5", value = "34.72.239.218" },
-  ]
+#   # Public IP + Datastream authorized networks, same as the original.
+#   ipv4_enabled = true
+#   authorized_networks = [
+#     { name = "datastream-1", value = "34.71.242.81" },
+#     { name = "datastream-2", value = "34.72.28.29" },
+#     { name = "datastream-3", value = "34.67.6.157" },
+#     { name = "datastream-4", value = "34.67.234.134" },
+#     { name = "datastream-5", value = "34.72.239.218" },
+#   ]
 
-  backup_enabled                 = true
-  binary_log_enabled             = true
-  backup_start_time              = "02:00"
-  transaction_log_retention_days = 7
+#   backup_enabled                 = true
+#   binary_log_enabled             = true
+#   backup_start_time              = "02:00"
+#   transaction_log_retention_days = 7
 
-  # Original had this off; module defaults it on since query insights are
-  # essentially free and valuable for prod debugging. Uncomment to match
-  # the original behavior exactly:
-  # query_insights_enabled = false
+#   # Original had this off; module defaults it on since query insights are
+#   # essentially free and valuable for prod debugging. Uncomment to match
+#   # the original behavior exactly:
+#   # query_insights_enabled = false
 
-  databases = ["db"]
+#   databases = ["db"]
 
-  users = {
-    mohit = {
-      host = "%"
-      # password omitted -> randomly generated, returned in outputs
-    }
-  }
+#   users = {
+#     mohit = {
+#       host = "%"
+#       # password omitted -> randomly generated, returned in outputs
+#     }
+#   }
 
-  # Prod default is true; the original set this false, so we override
-  # explicitly here to preserve the same behavior.
-  deletion_protection = false
+#   # Prod default is true; the original set this false, so we override
+#   # explicitly here to preserve the same behavior.
+#   deletion_protection = false
 
-  store_passwords_in_secret_manager = true
-}
+#   store_passwords_in_secret_manager = true
+# }
 
 
 resource "google_sql_database_instance" "mysql" {
