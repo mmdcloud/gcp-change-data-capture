@@ -163,17 +163,6 @@ resource "google_datastream_connection_profile" "destination_connection_profile"
   bigquery_profile {}
 }
 
-# Create the target dataset first
-resource "google_bigquery_dataset" "target_dataset" {
-  dataset_id  = "dp_bigquery"
-  location    = var.region
-  description = "Dataset for Datastream replication"
-
-  labels = {
-    source = "datastream"
-  }
-  depends_on = [google_sql_database_instance.mysql]
-}
 
 resource "google_datastream_stream" "stream" {
   stream_id    = "db-stream"
@@ -225,7 +214,6 @@ resource "google_datastream_stream" "stream" {
   depends_on = [
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
-    google_bigquery_dataset.target_dataset,
     google_sql_database_instance.mysql
   ]
 }
