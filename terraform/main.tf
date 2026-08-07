@@ -2,7 +2,17 @@
 # Data resource blocks
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
-data "google_bigquery_default_service_account" "bq_sa" {}
+
+
+# resource "random_password" "app_user" {
+#   length           = 32
+#   special          = true
+#   override_special = "!#$%^&*()-_=+[]{}<>:?"
+# }
+
+resource "random_id" "sql_suffix" {
+  byte_length = 3
+}
 
 # --------------------------------------------------------------------------
 # Registering Vault Provider
@@ -18,6 +28,34 @@ module "sql_password_secret" {
   source      = "./modules/secret-manager"
   secret_data = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id   = "db_password_secret"
+}
+
+# module "app_password_secret" {
+#   source      = "./modules/secret-manager"
+#   secret_data = random_password.app_user.result
+#   secret_id   = "db_app_user_password_secret"
+# }
+
+# --------------------------------------------------------------------------
+# VPC Configuration
+# --------------------------------------------------------------------------
+module "vpc" {
+  source                          = "./modules/vpc"
+  vpc_name                        = "vpc"
+  delete_default_routes_on_create = false
+  auto_create_subnetworks         = false
+  routing_mode                    = "REGIONAL"
+  subnets = [
+    {
+      name                     = "vpc-subnet"
+      region                   = var.region
+      purpose                  = "PRIVATE"
+      role                     = "ACTIVE"
+      private_ip_google_access = true
+      ip_cidr_range            = "10.0.0.0/16"
+    }
+  ]
+  firewall_data = []
 }
 
 # --------------------------------------------------------------------------
@@ -71,9 +109,22 @@ module "sql_password_secret" {
 #   store_passwords_in_secret_manager = true
 # }
 
+resource "google_compute_global_address" "private_ip_alloc" {
+  name          = "sql-private-ip-alloc"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 16
+  network       = module.vpc.vpc_id
+}
+
+resource "google_service_networking_connection" "private_vpc_connection" {
+  network                 = module.vpc.vpc_id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip_alloc.name]
+}
 
 resource "google_sql_database_instance" "mysql" {
-  name             = "encodedmadmaxcloudsql8442241500"
+  name             = "mysql-${random_id.sql_suffix.hex}"
   root_password    = module.sql_password_secret.secret_data
   database_version = "MYSQL_8_0"
   region           = var.region
@@ -87,43 +138,70 @@ resource "google_sql_database_instance" "mysql" {
       data_cache_enabled = false
     }
 
-    disk_size = 10
+    disk_size       = 10
+    disk_type       = "PD_SSD"
+    disk_autoresize = true
 
     insights_config {
-      query_insights_enabled = false
+      query_insights_enabled  = true
+      query_string_length     = 1024
+      record_application_tags = true
+      record_client_address   = false
     }
-
-    deletion_protection_enabled = false
 
     backup_configuration {
       enabled                        = true
       binary_log_enabled             = true
       start_time                     = "02:00"
       transaction_log_retention_days = 7
+
+      backup_retention_settings {
+        retained_backups = 30
+        retention_unit   = "COUNT"
+      }
+    }
+
+    maintenance_window {
+      day          = 7 # Sunday
+      hour         = 3
+      update_track = "stable"
+    }
+
+    database_flags {
+      name  = "binlog_row_image"
+      value = "full"
+    }
+
+    database_flags {
+      name  = "binlog_expire_logs_seconds"
+      value = "86400" # keep binlogs >= 1 day so backfill/CDC never stalls on purge
     }
 
     ip_configuration {
-      ipv4_enabled = true
-      # Add Datastream service IPs for your region
-      authorized_networks {
-        value = "34.71.242.81"
-      }
-      authorized_networks {
-        value = "34.72.28.29"
-      }
-      authorized_networks {
-        value = "34.67.6.157"
-      }
-      authorized_networks {
-        value = "34.67.234.134"
-      }
-      authorized_networks {
-        value = "34.72.239.218"
-      }
+      ipv4_enabled    = true
+      private_network = module.vpc.vpc_id
+
+      # authorized_networks {
+      #   value = "34.71.242.81"
+      # }
+      # authorized_networks {
+      #   value = "34.72.28.29"
+      # }
+      # authorized_networks {
+      #   value = "34.67.6.157"
+      # }
+      # authorized_networks {
+      #   value = "34.67.234.134"
+      # }
+      # authorized_networks {
+      #   value = "34.72.239.218"
+      # }
     }
   }
 
   deletion_protection = false
+
+  depends_on = [google_service_networking_connection.private_vpc_connection]
 }
 
 resource "google_sql_database" "db" {
@@ -138,20 +216,48 @@ resource "google_sql_user" "user" {
   password = module.sql_password_secret.secret_data
 }
 
+resource "google_project_iam_member" "datastream_bq_editor" {
+  project = var.project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "datastream_bq_jobuser" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+}
+
 # --------------------------------------------------------------------------
 # Datastream configuration (CDC)
 # --------------------------------------------------------------------------
+resource "google_datastream_private_connection" "private_connection" {
+  display_name          = "datastream-private-connection"
+  location              = var.region
+  private_connection_id = "datastream-private-connection"
+
+  vpc_peering_config {
+    vpc    = module.vpc.vpc_id
+    subnet = "10.99.0.0/29"
+  }
+}
+
 resource "google_datastream_connection_profile" "source_connection_profile" {
   display_name          = "Source connection profile"
   location              = var.region
   connection_profile_id = "source-profile"
 
   mysql_profile {
-    hostname = google_sql_database_instance.mysql.public_ip_address
+    hostname = google_sql_database_instance.mysql.private_ip_address
     port     = 3306
     username = google_sql_user.user.name
     password = google_sql_user.user.password
   }
+
+  private_connectivity {
+    private_connection = google_datastream_private_connection.private_connection.id
+  }
+
   depends_on = [google_sql_database_instance.mysql]
 }
 
@@ -162,7 +268,6 @@ resource "google_datastream_connection_profile" "destination_connection_profile"
 
   bigquery_profile {}
 }
-
 
 resource "google_datastream_stream" "stream" {
   stream_id    = "db-stream"
