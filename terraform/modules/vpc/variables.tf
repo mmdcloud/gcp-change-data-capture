@@ -6,7 +6,7 @@ variable "firewall_data" {
   type = list(object({
     name          = string
     source_ranges = optional(set(string))
-    target_tags   = set(string)
+    target_tags   = optional(set(string))
     source_tags   = optional(set(string))
     allow_list = set(object({
       protocol = string

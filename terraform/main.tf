@@ -53,9 +53,28 @@ module "vpc" {
       role                     = "ACTIVE"
       private_ip_google_access = true
       ip_cidr_range            = "10.0.0.0/16"
+    },
+    {
+      name                     = "proxy-vm-subnet"
+      region                   = var.region
+      purpose                  = "PRIVATE"
+      role                     = "ACTIVE"
+      private_ip_google_access = true
+      ip_cidr_range            = "10.1.0.0/16"
     }
   ]
-  firewall_data = []
+  firewall_data = [
+    {
+      name          = "datastream-cloudsql-firewall"
+      source_ranges = ["10.99.0.0/29"]
+      allow_list = [
+        {
+          protocol = "tcp"
+          ports    = ["3306"]
+        }
+      ]
+    }
+  ]
 }
 
 # --------------------------------------------------------------------------
@@ -120,6 +139,8 @@ resource "google_compute_global_address" "private_ip_alloc" {
 resource "google_service_networking_connection" "private_vpc_connection" {
   network                 = module.vpc.vpc_id
   service                 = "servicenetworking.googleapis.com"
+  update_on_creation_fail = true
+  deletion_policy         = "ABANDON"
   reserved_peering_ranges = [google_compute_global_address.private_ip_alloc.name]
 }
 
@@ -178,7 +199,7 @@ resource "google_sql_database_instance" "mysql" {
     }
 
     ip_configuration {
-      ipv4_enabled    = true
+      ipv4_enabled    = false
       private_network = module.vpc.vpc_id
 
       # authorized_networks {
@@ -228,6 +249,29 @@ resource "google_project_iam_member" "datastream_bq_jobuser" {
   member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
 }
 
+module "sql_proxy" {
+  source                    = "./modules/compute"
+  name                      = "datastream-sql-proxy"
+  machine_type              = "e2-micro"
+  zone                      = "${var.region}-a"
+  metadata_startup_script   = <<-EOT
+    #!/bin/bash
+    apt-get update && apt-get install -y socat
+    socat TCP-LISTEN:3306,fork,reuseaddr TCP:${google_sql_database_instance.mysql.private_ip_address}:3306 &
+  EOT
+  deletion_protection       = false
+  allow_stopping_for_update = true
+  image                     = "debian-cloud/debian-12"
+  network_interfaces = [
+    {
+      network        = "${module.vpc.vpc_id}"
+      subnetwork     = "${module.vpc.subnets[1].id}"
+      access_configs = []
+    }
+  ]
+  tags = ["datastream-sql-proxy"]
+}
+
 # --------------------------------------------------------------------------
 # Datastream configuration (CDC)
 # --------------------------------------------------------------------------
@@ -242,13 +286,22 @@ resource "google_datastream_private_connection" "private_connection" {
   }
 }
 
+resource "google_compute_network_peering_routes_config" "sql_peering_routes" {
+  peering              = google_service_networking_connection.private_vpc_connection.peering
+  network              = "vpc"
+  export_custom_routes = true
+  import_custom_routes = false
+
+  depends_on = [google_service_networking_connection.private_vpc_connection]
+}
+
 resource "google_datastream_connection_profile" "source_connection_profile" {
   display_name          = "Source connection profile"
   location              = var.region
   connection_profile_id = "source-profile"
 
   mysql_profile {
-    hostname = google_sql_database_instance.mysql.private_ip_address
+    hostname = module.sql_proxy.network_ip
     port     = 3306
     username = google_sql_user.user.name
     password = google_sql_user.user.password
