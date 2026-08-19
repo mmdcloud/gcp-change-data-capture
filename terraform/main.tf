@@ -3,7 +3,6 @@
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
 
-
 # resource "random_password" "app_user" {
 #   length           = 32
 #   special          = true
@@ -80,161 +79,78 @@ module "vpc" {
 # --------------------------------------------------------------------------
 # Cloud SQL Configuration
 # --------------------------------------------------------------------------
-# module "mysql" {
-#   source = "./modules/cloudsql-sql"
-
-#   project_id    = var.project_id
-#   region        = var.region
-#   instance_name = "encodedmadmaxcloudsql"
-
-#   tier              = "db-f1-micro"
-#   edition           = "ENTERPRISE"
-#   availability_type = "ZONAL"
-#   disk_size         = 10
-
-#   # Public IP + Datastream authorized networks, same as the original.
-#   ipv4_enabled = true
-#   authorized_networks = [
-#     { name = "datastream-1", value = "34.71.242.81" },
-#     { name = "datastream-2", value = "34.72.28.29" },
-#     { name = "datastream-3", value = "34.67.6.157" },
-#     { name = "datastream-4", value = "34.67.234.134" },
-#     { name = "datastream-5", value = "34.72.239.218" },
-#   ]
-
-#   backup_enabled                 = true
-#   binary_log_enabled             = true
-#   backup_start_time              = "02:00"
-#   transaction_log_retention_days = 7
-
-#   # Original had this off; module defaults it on since query insights are
-#   # essentially free and valuable for prod debugging. Uncomment to match
-#   # the original behavior exactly:
-#   # query_insights_enabled = false
-
-#   databases = ["db"]
-
-#   users = {
-#     mohit = {
-#       host = "%"
-#       # password omitted -> randomly generated, returned in outputs
-#     }
-#   }
-
-#   # Prod default is true; the original set this false, so we override
-#   # explicitly here to preserve the same behavior.
-#   deletion_protection = false
-
-#   store_passwords_in_secret_manager = true
-# }
-
-resource "google_compute_global_address" "private_ip_alloc" {
-  name          = "sql-private-ip-alloc"
-  purpose       = "VPC_PEERING"
-  address_type  = "INTERNAL"
-  prefix_length = 16
-  network       = module.vpc.vpc_id
-}
-
-resource "google_service_networking_connection" "private_vpc_connection" {
-  network                 = module.vpc.vpc_id
-  service                 = "servicenetworking.googleapis.com"
-  update_on_creation_fail = true
-  deletion_policy         = "ABANDON"
-  reserved_peering_ranges = [google_compute_global_address.private_ip_alloc.name]
-}
-
-resource "google_sql_database_instance" "mysql" {
-  name             = "mysql-${random_id.sql_suffix.hex}"
-  root_password    = module.sql_password_secret.secret_data
-  database_version = "MYSQL_8_0"
-  region           = var.region
-
-  settings {
-    tier              = "db-f1-micro"
-    edition           = "ENTERPRISE"
-    availability_type = "ZONAL"
-
-    data_cache_config {
-      data_cache_enabled = false
-    }
-
-    disk_size       = 10
-    disk_type       = "PD_SSD"
-    disk_autoresize = true
-
-    insights_config {
-      query_insights_enabled  = true
-      query_string_length     = 1024
-      record_application_tags = true
-      record_client_address   = false
-    }
-
-    backup_configuration {
+module "mysql" {
+  source                      = "./modules/cloud-sql"
+  name                        = "mysql-${random_id.sql_suffix.hex}"
+  db_name                     = "mysql-${random_id.sql_suffix.hex}"
+  db_user                     = "mohit"
+  db_version                  = "MYSQL_8_0"
+  location                    = var.region
+  tier                        = "db-f1-micro"
+  availability_type           = "ZONAL"
+  disk_size                   = 100 # GB
+  disk_type                   = "PD_SSD"
+  disk_autoresize             = true
+  disk_autoresize_limit       = 500 # GB
+  ipv4_enabled                = false
+  deletion_protection_enabled = true
+  backup_configuration = [
+    {
       enabled                        = true
       binary_log_enabled             = true
-      start_time                     = "02:00"
-      transaction_log_retention_days = 7
-
-      backup_retention_settings {
-        retained_backups = 30
-        retention_unit   = "COUNT"
-      }
+      start_time                     = "03:00"
+      location                       = var.region
+      point_in_time_recovery_enabled = false
+      backup_retention_settings = [
+        {
+          retained_backups = 30
+          retention_unit   = "COUNT"
+        }
+      ]
     }
-
-    maintenance_window {
-      day          = 7 # Sunday
-      hour         = 3
-      update_track = "stable"
-    }
-
-    database_flags {
+  ]
+  database_flags = [
+    {
+      name  = "general_log"
+      value = "on"
+    },
+    {
+      name  = "log_queries_not_using_indexes"
+      value = "on"
+    },
+    {
+      name  = "max_connections"
+      value = "1000"
+    },
+    {
+      name  = "skip_show_database"
+      value = "on"
+    },
+    {
+      name  = "slow_query_log"
+      value = "on"
+    },
+    {
+      name  = "long_query_time"
+      value = "2"
+    },
+    {
+      name  = "log_output"
+      value = "FILE"
+    },
+    {
+      name  = "binlog_expire_logs_seconds"
+      value = "86400"
+    },
+    {
       name  = "binlog_row_image"
       value = "full"
     }
-
-    database_flags {
-      name  = "binlog_expire_logs_seconds"
-      value = "86400" # keep binlogs >= 1 day so backfill/CDC never stalls on purge
-    }
-
-    ip_configuration {
-      ipv4_enabled    = false
-      private_network = module.vpc.vpc_id
-
-      # authorized_networks {
-      #   value = "34.71.242.81"
-      # }
-      # authorized_networks {
-      #   value = "34.72.28.29"
-      # }
-      # authorized_networks {
-      #   value = "34.67.6.157"
-      # }
-      # authorized_networks {
-      #   value = "34.67.234.134"
-      # }
-      # authorized_networks {
-      #   value = "34.72.239.218"
-      # }
-    }
-  }
-
-  deletion_protection = false
-
-  depends_on = [google_service_networking_connection.private_vpc_connection]
-}
-
-resource "google_sql_database" "db" {
-  instance = google_sql_database_instance.mysql.name
-  name     = "db"
-}
-
-resource "google_sql_user" "user" {
-  name     = "mohit"
-  instance = google_sql_database_instance.mysql.name
-  host     = "%"
-  password = module.sql_password_secret.secret_data
+  ]
+  vpc_self_link = module.vpc.self_link
+  vpc_id        = module.vpc.vpc_id
+  password      = module.sql_password_secret.secret_data
+  depends_on    = [module.sql_password_secret]
 }
 
 resource "google_project_iam_member" "datastream_bq_editor" {
@@ -257,7 +173,7 @@ module "sql_proxy" {
   metadata_startup_script   = <<-EOT
     #!/bin/bash
     apt-get update && apt-get install -y socat
-    socat TCP-LISTEN:3306,fork,reuseaddr TCP:${google_sql_database_instance.mysql.private_ip_address}:3306 &
+    socat TCP-LISTEN:3306,fork,reuseaddr TCP:${module.mysql.db_ip_address}:3306 &
   EOT
   deletion_protection       = false
   allow_stopping_for_update = true
@@ -287,12 +203,12 @@ resource "google_datastream_private_connection" "private_connection" {
 }
 
 resource "google_compute_network_peering_routes_config" "sql_peering_routes" {
-  peering              = google_service_networking_connection.private_vpc_connection.peering
+  peering              = module.mysql.private_vpc_connection_peering
   network              = "vpc"
   export_custom_routes = true
   import_custom_routes = false
 
-  depends_on = [google_service_networking_connection.private_vpc_connection]
+  depends_on = [module.mysql]
 }
 
 resource "google_datastream_connection_profile" "source_connection_profile" {
@@ -303,15 +219,15 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
   mysql_profile {
     hostname = module.sql_proxy.network_ip
     port     = 3306
-    username = google_sql_user.user.name
-    password = google_sql_user.user.password
+    username = "mohit"
+    password = module.sql_password_secret.secret_data
   }
 
   private_connectivity {
     private_connection = google_datastream_private_connection.private_connection.id
   }
 
-  depends_on = [google_sql_database_instance.mysql]
+  depends_on = [module.mysql]
 }
 
 resource "google_datastream_connection_profile" "destination_connection_profile" {
@@ -337,7 +253,7 @@ resource "google_datastream_stream" "stream" {
       # Allow Datastream to discover schema automatically
       include_objects {
         mysql_databases {
-          database = google_sql_database.db.name
+          database = "mysql-${random_id.sql_suffix.hex}"
           mysql_tables {
             table = "users"
             # Remove explicit column definitions - let Datastream discover them
@@ -372,6 +288,6 @@ resource "google_datastream_stream" "stream" {
   depends_on = [
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
-    google_sql_database_instance.mysql
+    module.mysql
   ]
 }
