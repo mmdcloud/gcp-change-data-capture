@@ -93,7 +93,7 @@ module "mysql" {
   disk_autoresize             = true
   disk_autoresize_limit       = 500 # GB
   ipv4_enabled                = false
-  deletion_protection_enabled = true
+  deletion_protection_enabled = false
   backup_configuration = [
     {
       enabled                        = true
