@@ -199,8 +199,8 @@ module "sql_proxy" {
   image                     = "debian-cloud/debian-12"
   network_interfaces = [
     {
-      network        = "${module.vpc.vpc_id}"
-      subnetwork     = "${module.vpc.subnets[1].id}"
+      network        = module.vpc.vpc_id
+      subnetwork     = module.vpc.subnets[1].id
       access_configs = []
     }
   ]
