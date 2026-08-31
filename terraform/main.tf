@@ -3,11 +3,11 @@
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
 
-# resource "random_password" "app_user" {
-#   length           = 32
-#   special          = true
-#   override_special = "!#$%^&*()-_=+[]{}<>:?"
-# }
+resource "random_password" "datastream_reader" {
+  length           = 32
+  special          = true
+  override_special = "!#$%^&*()-_=+[]{}<>:?"
+}
 
 resource "random_id" "sql_suffix" {
   byte_length = 3
@@ -29,11 +29,11 @@ module "sql_password_secret" {
   secret_id   = "db_password_secret"
 }
 
-# module "app_password_secret" {
-#   source      = "./modules/secret-manager"
-#   secret_data = random_password.app_user.result
-#   secret_id   = "db_app_user_password_secret"
-# }
+module "datastream_reader_secret" {
+  source      = "./modules/secret-manager"
+  secret_data = random_password.datastream_reader.result
+  secret_id   = "datastream_reader_password_secret"
+}
 
 # --------------------------------------------------------------------------
 # VPC Configuration
@@ -65,6 +65,7 @@ module "vpc" {
   firewall_data = [
     {
       name          = "datastream-cloudsql-firewall"
+      target_tags   = ["datastream-sql-proxy"]
       source_ranges = ["10.99.0.0/29"]
       allow_list = [
         {
@@ -72,7 +73,18 @@ module "vpc" {
           ports    = ["3306"]
         }
       ]
-    }
+    },
+    {
+      name          = "datastream-sql-proxy-firewall-ssh"
+      target_tags   = ["datastream-sql-proxy"]
+      source_ranges = ["35.235.240.0/20"]
+      allow_list = [
+        {
+          protocol = "tcp"
+          ports    = ["22"]
+        }
+      ]
+    },
   ]
 }
 
@@ -87,20 +99,20 @@ module "mysql" {
   db_version                  = "MYSQL_8_0"
   location                    = var.region
   tier                        = "db-f1-micro"
-  availability_type           = "ZONAL"
-  disk_size                   = 100 # GB
+  availability_type           = "ZONAL" # REGIONAL for production
+  disk_size                   = 100     # GB
   disk_type                   = "PD_SSD"
   disk_autoresize             = true
   disk_autoresize_limit       = 500 # GB
   ipv4_enabled                = false
-  deletion_protection_enabled = false
+  deletion_protection_enabled = false # true for production
   backup_configuration = [
     {
       enabled                        = true
       binary_log_enabled             = true
       start_time                     = "03:00"
       location                       = var.region
-      point_in_time_recovery_enabled = false
+      point_in_time_recovery_enabled = false # true for production
       backup_retention_settings = [
         {
           retained_backups = 30
@@ -112,7 +124,7 @@ module "mysql" {
   database_flags = [
     {
       name  = "general_log"
-      value = "on"
+      value = "off"
     },
     {
       name  = "log_queries_not_using_indexes"
@@ -153,6 +165,13 @@ module "mysql" {
   depends_on    = [module.sql_password_secret]
 }
 
+resource "google_sql_user" "datastream_reader" {
+  name     = "datastream_reader"
+  instance = module.mysql.instance_name
+  password = random_password.datastream_reader.result
+  host     = "%"
+}
+
 resource "google_project_iam_member" "datastream_bq_editor" {
   project = var.project_id
   role    = "roles/bigquery.dataEditor"
@@ -188,9 +207,6 @@ module "sql_proxy" {
   tags = ["datastream-sql-proxy"]
 }
 
-# --------------------------------------------------------------------------
-# Datastream configuration (CDC)
-# --------------------------------------------------------------------------
 resource "google_datastream_private_connection" "private_connection" {
   display_name          = "datastream-private-connection"
   location              = var.region
@@ -204,7 +220,7 @@ resource "google_datastream_private_connection" "private_connection" {
 
 resource "google_compute_network_peering_routes_config" "sql_peering_routes" {
   peering              = module.mysql.private_vpc_connection_peering
-  network              = "vpc"
+  network              = module.vpc.name
   export_custom_routes = true
   import_custom_routes = false
 
@@ -219,8 +235,8 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
   mysql_profile {
     hostname = module.sql_proxy.network_ip
     port     = 3306
-    username = "mohit"
-    password = module.sql_password_secret.secret_data
+    username = google_sql_user.datastream_reader.name
+    password = random_password.datastream_reader.result
   }
 
   private_connectivity {
@@ -244,7 +260,7 @@ resource "google_datastream_stream" "stream" {
   display_name = "db-stream"
 
   # Start with PAUSED state for initial validation
-  desired_state = "RUNNING"
+  desired_state = "PAUSED"
 
   source_config {
     source_connection_profile = google_datastream_connection_profile.source_connection_profile.id
@@ -291,3 +307,7 @@ resource "google_datastream_stream" "stream" {
     module.mysql
   ]
 }
+
+
+# GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'datastream_reader'@'%';
+# FLUSH PRIVILEGES;
