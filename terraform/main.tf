@@ -31,7 +31,7 @@ module "sql_password_secret" {
 
 module "datastream_reader_secret" {
   source      = "./modules/secret-manager"
-  secret_data = random_password.datastream_reader.result
+  secret_data = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id   = "datastream_reader_password_secret"
 }
 
@@ -200,7 +200,7 @@ module "sql_proxy" {
   network_interfaces = [
     {
       network        = module.vpc.vpc_id
-      subnetwork     = module.vpc.subnets[1].id
+      subnetwork     = module.vpc.subnet_ids["proxy-vm-subnet"]
       access_configs = []
     }
   ]
@@ -220,7 +220,7 @@ resource "google_datastream_private_connection" "private_connection" {
 
 resource "google_compute_network_peering_routes_config" "sql_peering_routes" {
   peering              = module.mysql.private_vpc_connection_peering
-  network              = module.vpc.name
+  network              = module.vpc.vpc_name
   export_custom_routes = true
   import_custom_routes = false
 
@@ -260,7 +260,7 @@ resource "google_datastream_stream" "stream" {
   display_name = "db-stream"
 
   # Start with PAUSED state for initial validation
-  desired_state = "PAUSED"
+  desired_state = "RUNNING"
 
   source_config {
     source_connection_profile = google_datastream_connection_profile.source_connection_profile.id
