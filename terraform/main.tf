@@ -3,12 +3,6 @@
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
 
-resource "random_password" "datastream_reader" {
-  length           = 32
-  special          = true
-  override_special = "!#$%^&*()-_=+[]{}<>:?"
-}
-
 resource "random_id" "sql_suffix" {
   byte_length = 3
 }
@@ -168,7 +162,7 @@ module "mysql" {
 resource "google_sql_user" "datastream_reader" {
   name     = "datastream_reader"
   instance = module.mysql.instance_name
-  password = random_password.datastream_reader.result
+  password = module.sql_password_secret.secret_data
   host     = "%"
 }
 
@@ -236,7 +230,7 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
     hostname = module.sql_proxy.network_ip
     port     = 3306
     username = google_sql_user.datastream_reader.name
-    password = random_password.datastream_reader.result
+    password = module.sql_password_secret.secret_data
   }
 
   private_connectivity {
