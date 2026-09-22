@@ -10,7 +10,7 @@ output "db_ip_address" {
   value = google_sql_database_instance.db_instance.private_ip_address
 }
 
-output "instance_name" {
+output "db_name" {
   value = google_sql_database_instance.db_instance.name
 }
 

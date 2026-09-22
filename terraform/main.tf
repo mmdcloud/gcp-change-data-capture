@@ -3,6 +3,11 @@
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
 
+data "google_compute_image" "ubuntu_2404" {
+  family  = var.image_family
+  project = var.image_project
+}
+
 resource "random_id" "sql_suffix" {
   byte_length = 3
 }
@@ -18,17 +23,17 @@ data "vault_generic_secret" "sql" {
 # Secret Manager
 # --------------------------------------------------------------------------
 module "sql_password_secret" {
-  source      = "./modules/secret-manager"
+  source              = "./modules/secret-manager"
   deletion_protection = false
-  secret_data = tostring(data.vault_generic_secret.sql.data["password"])
-  secret_id   = "db_password_secret"
+  secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
+  secret_id           = "db_password_secret"
 }
 
 module "datastream_reader_secret" {
-  source      = "./modules/secret-manager"
+  source              = "./modules/secret-manager"
   deletion_protection = false
-  secret_data = tostring(data.vault_generic_secret.sql.data["password"])
-  secret_id   = "datastream_reader_password_secret"
+  secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
+  secret_id           = "datastream_reader_password_secret"
 }
 
 # --------------------------------------------------------------------------
@@ -163,9 +168,9 @@ module "mysql" {
 
 resource "google_sql_user" "datastream_reader" {
   name     = "datastream_reader"
-  instance = module.mysql.instance_name
-  password = module.sql_password_secret.secret_data
-  host     = "%"
+  instance = module.mysql.db_name
+  password = module.datastream_reader_secret.secret_data
+  host     = module.sql_proxy.network_ip
 }
 
 resource "google_project_iam_member" "datastream_bq_editor" {
@@ -192,7 +197,17 @@ module "sql_proxy" {
   EOT
   deletion_protection       = false
   allow_stopping_for_update = true
-  image                     = "debian-cloud/debian-12"
+
+  boot_disk = {
+    auto_delete = true
+    device_name = "boot-disk"
+    mode        = "READ_WRITE"
+    image       = data.google_compute_image.ubuntu_2404.self_link
+    size        = var.instance_boot_disk_size_gb
+    type        = var.instance_boot_disk_type
+    labels      = var.labels
+  }
+
   network_interfaces = [
     {
       network        = module.vpc.vpc_id
