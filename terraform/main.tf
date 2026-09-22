@@ -19,12 +19,14 @@ data "vault_generic_secret" "sql" {
 # --------------------------------------------------------------------------
 module "sql_password_secret" {
   source      = "./modules/secret-manager"
+  deletion_protection = false
   secret_data = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id   = "db_password_secret"
 }
 
 module "datastream_reader_secret" {
   source      = "./modules/secret-manager"
+  deletion_protection = false
   secret_data = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id   = "datastream_reader_password_secret"
 }
