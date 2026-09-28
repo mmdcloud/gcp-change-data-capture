@@ -18,6 +18,10 @@ output "db_connection_name" {
   value = google_sql_database_instance.db_instance.connection_name
 }
 
+output "psc_service_attachment_link" {
+  value = google_sql_database_instance.db_instance.psc_service_attachment_link
+}
+
 output "private_vpc_connection_peering" {
   value = google_service_networking_connection.private_vpc_connection.peering
 }

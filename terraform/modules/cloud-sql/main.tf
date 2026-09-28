@@ -271,7 +271,7 @@ resource "google_sql_database_instance" "db_instance" {
       server_ca_pool                                = var.server_ca_pool
       server_certificate_rotation_mode              = var.server_certificate_rotation_mode
       ssl_mode                                      = var.ssl_mode
-
+      
       dynamic "authorized_networks" {
         for_each = var.authorized_networks
         content {
