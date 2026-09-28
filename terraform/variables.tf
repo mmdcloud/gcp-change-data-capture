@@ -323,3 +323,8 @@ variable "datastream_data_freshness" {
   type        = string
   default     = "900s"
 }
+
+variable "notification_channels" {
+  type    = list(string)
+  default = []
+}

@@ -273,18 +273,190 @@ resource "google_datastream_stream" "stream" {
 # --------------------------------------------------------------------------
 # Observability Configuration
 # --------------------------------------------------------------------------
-# module "cloudsql_cpu_utilization" {
-#   source = "./modules/observability/metrics"
+module "cloudsql_error_log" {
+  source = "./modules/observability/metrics"
 
-#   name   = "cloudsql_cpu_utilization"
-#   filter = <<-EOT
-#     resource.type="cloudsql_database"
-#     metric.type="cloudsql.googleapis.com/database/cpu/utilization"
-#   EOT
+  name         = "cloudsql_mysql_error_log"
+  display_name = "Cloud SQL MySQL error log entries"
+  filter       = <<-EOT
+    resource.type="cloudsql_database"
+    log_id("cloudsql.googleapis.com/mysql.err")
+    severity>=ERROR
+  EOT
 
-#   metric_kind  = "GAUGE"
-#   value_type   = "DOUBLE"
-#   display_name = "Cloud SQL CPU Utilization"
+  metric_kind = "DELTA"
+  value_type  = "INT64"
+  label_extractors = {
+    "database_id" = "EXTRACT(resource.labels.database_id)"
+  }
+}
 
-#   label_extractors = {}
-# }
+module "cloudsql_slow_queries" {
+  source = "./modules/observability/metrics"
+
+  name         = "cloudsql_slow_queries"
+  display_name = "Cloud SQL slow queries"
+  filter       = <<-EOT
+    resource.type="cloudsql_database"
+    log_id("cloudsql.googleapis.com/mysql-slow.log")
+  EOT
+
+  metric_kind      = "DELTA"
+  value_type       = "INT64"
+  label_extractors = {}
+}
+
+module "cloudsql_backup_failures" {
+  source = "./modules/observability/metrics"
+
+  name         = "cloudsql_backup_failures"
+  display_name = "Cloud SQL backup failures"
+  filter       = <<-EOT
+    resource.type="cloudsql_database"
+    protoPayload.serviceName="cloudsql.googleapis.com"
+    protoPayload.methodName=~"(?i)backup"
+    severity>=ERROR
+  EOT
+
+  metric_kind      = "DELTA"
+  value_type       = "INT64"
+  label_extractors = {}
+}
+
+module "datastream_errors" {
+  source = "./modules/observability/metrics"
+
+  name         = "datastream_errors"
+  display_name = "Datastream stream errors"
+  filter       = <<-EOT
+    resource.type="datastream.googleapis.com/Stream"
+    severity>=ERROR
+  EOT
+
+  metric_kind      = "DELTA"
+  value_type       = "INT64"
+  label_extractors = {}
+}
+
+locals {
+  cloudsql_alerts = {
+    cpu = {
+      display    = "CPU > 80% for 10m"
+      metric     = "cloudsql.googleapis.com/database/cpu/utilization"
+      comparison = "COMPARISON_GT"
+      threshold  = 0.8
+      duration   = "600s"
+      aligner    = "ALIGN_MEAN"
+    }
+    memory = {
+      display    = "Memory > 90% for 10m"
+      metric     = "cloudsql.googleapis.com/database/memory/utilization"
+      comparison = "COMPARISON_GT"
+      threshold  = 0.9
+      duration   = "600s"
+      aligner    = "ALIGN_MEAN"
+    }
+    connections = {
+      display    = "Connections > 800 (80% of max_connections=1000)"
+      metric     = "cloudsql.googleapis.com/database/network/connections"
+      comparison = "COMPARISON_GT"
+      threshold  = 800
+      duration   = "300s"
+      aligner    = "ALIGN_MEAN"
+    }
+    disk = {
+      display    = "Disk utilization > 80%"
+      metric     = "cloudsql.googleapis.com/database/disk/utilization"
+      comparison = "COMPARISON_GT"
+      threshold  = 0.8
+      duration   = "600s"
+      aligner    = "ALIGN_MEAN"
+    }
+    down = {
+      display    = "Instance not up"
+      metric     = "cloudsql.googleapis.com/database/up"
+      comparison = "COMPARISON_LT"
+      threshold  = 1
+      duration   = "120s"
+      aligner    = "ALIGN_MEAN"
+    }
+    failover = {
+      display    = "Not available for failover (HA degraded)"
+      metric     = "cloudsql.googleapis.com/database/available_for_failover"
+      comparison = "COMPARISON_LT"
+      threshold  = 1
+      duration   = "300s"
+      aligner    = "ALIGN_FRACTION_TRUE"
+    }
+  }
+
+  datastream_alerts = {
+    freshness = {
+      display    = "Data freshness > 10 min"
+      metric     = "datastream.googleapis.com/stream/freshness"
+      comparison = "COMPARISON_GT"
+      threshold  = 600
+      duration   = "600s"
+      aligner    = "ALIGN_MAX"
+    }
+    unsupported = {
+      display    = "Unsupported events > 0"
+      metric     = "datastream.googleapis.com/stream/unsupported_event_count"
+      comparison = "COMPARISON_GT"
+      threshold  = 0
+      duration   = "0s"
+      aligner    = "ALIGN_SUM"
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "cloudsql" {
+  for_each     = local.cloudsql_alerts
+  display_name = "Cloud SQL: ${each.value.display}"
+  combiner     = "OR"
+
+  conditions {
+    display_name = each.value.display
+    condition_threshold {
+      filter = join(" AND ", [
+        "resource.type = \"cloudsql_database\"",
+        "resource.labels.database_id = \"${var.project_id}:${local.db_instance_name}\"",
+        "metric.type = \"${each.value.metric}\"",
+      ])
+      comparison      = each.value.comparison
+      threshold_value = each.value.threshold
+      duration        = each.value.duration
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = each.value.aligner
+      }
+    }
+  }
+
+  notification_channels = var.notification_channels
+}
+
+resource "google_monitoring_alert_policy" "datastream" {
+  for_each     = local.datastream_alerts
+  display_name = "Datastream: ${each.value.display}"
+  combiner     = "OR"
+
+  conditions {
+    display_name = each.value.display
+    condition_threshold {
+      filter = join(" AND ", [
+        "resource.type = \"datastream.googleapis.com/Stream\"",
+        "metric.type = \"${each.value.metric}\"",
+      ])
+      comparison      = each.value.comparison
+      threshold_value = each.value.threshold
+      duration        = each.value.duration
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = each.value.aligner
+      }
+    }
+  }
+
+  notification_channels = var.notification_channels
+}
