@@ -100,12 +100,14 @@ module "mysql" {
   disk_autoresize_limit       = var.db_disk_autoresize_limit_gb
   ipv4_enabled                = var.db_ipv4_enabled
   deletion_protection_enabled = var.db_deletion_protection_enabled
+
   psc_config = [
     {
       psc_enabled               = true
       allowed_consumer_projects = [var.project_id]
     }
   ]
+
   backup_configuration = [
     {
       enabled                        = true
@@ -459,4 +461,188 @@ resource "google_monitoring_alert_policy" "datastream" {
   }
 
   notification_channels = var.notification_channels
+}
+
+# --------------------------------------------------------------------------
+# Dead Letter Queue(DLQ) Configuration
+# --------------------------------------------------------------------------
+module "dlq_dataset" {
+  source     = "./modules/bigquery"
+  dataset_id = "${var.datastream_bq_dataset_id_prefix}_dlq"
+  location   = var.region
+  description = "Dead-letter storage for unhandled Datastream CDC errors"
+  tables = [{
+    table_id            = "datastream_failed_events"
+    deletion_protection = false
+    time_partitioning = {
+      field = "timestamp"
+      type  = "DAY"
+    }
+    schema = jsonencode([
+      { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
+      { name = "stream_id", type = "STRING", mode = "REQUIRED" },
+      { name = "log_name", type = "STRING", mode = "NULLABLE" },
+      { name = "severity", type = "STRING", mode = "NULLABLE" },
+      { name = "error_message", type = "STRING", mode = "NULLABLE" },
+      { name = "raw_payload", type = "STRING", mode = "NULLABLE" }
+    ])
+  }]
+}
+
+module "datastream_dlq" {
+  source                     = "./modules/pubsub"
+  topic_name                 = "datastream-cdc-dlq"
+  enable_schema              = true
+  schema_name                = "datastream-cdc-dlq-schema"
+  schema_type                = "AVRO"
+  schema_encoding            = "JSON"
+  schema_definition          = ""
+  message_retention_duration = "604800s"
+
+  subscriptions = {
+    "datastream-cdc-dlq-sub" = {
+      subscription_name          = "datastream-cdc-dlq-sub"
+      message_retention_duration = "604800s"
+      retain_acked_messages      = false
+      ack_deadline_seconds       = 60
+    }
+  }
+
+  depends_on = [google_project_iam_member.pubsub_subscriber]
+}
+
+# --------------------------------------------------------------------------
+# Log Sink: Intercept Datastream Operational & Engine Errors
+# --------------------------------------------------------------------------
+resource "google_logging_project_sink" "datastream_error_sink" {
+  name        = "datastream-cdc-error-sink"
+  destination = "pubsub.googleapis.com/${module.datastream_dlq.id}"
+  filter      = <<-EOT
+    resource.type="datastream.googleapis.com/Stream"
+    severity>=WARNING OR
+    (protoPayload.serviceName="datastream.googleapis.com" AND protoPayload.status.code!=0)
+  EOT
+
+  unique_writer_identity = true
+}
+
+# Authorize Log Sink to publish directly to the Pub/Sub DLQ Topic
+resource "google_pubsub_topic_iam_member" "sink_publisher" {
+  topic  = module.datastream_dlq.id
+  role   = "roles/pubsub.publisher"
+  member = google_logging_project_sink.datastream_error_sink.writer_identity
+}
+
+# --------------------------------------------------------------------------
+# Alert Channel for Pub/Sub (Link Monitoring Alert to DLQ Topic)
+# --------------------------------------------------------------------------
+resource "google_monitoring_notification_channel" "dlq_pubsub" {
+  display_name = "Datastream DLQ PubSub Channel"
+  type         = "pubsub"
+
+  labels = {
+    topic = module.datastream_dlq.id
+  }
+}
+
+# Update notification channels on the existing Datastream alert policy:
+# (Replace your existing resource declaration with this updated version)
+resource "google_monitoring_alert_policy" "datastream" {
+  for_each     = local.datastream_alerts
+  display_name = "Datastream: ${each.value.display}"
+  combiner     = "OR"
+
+  conditions {
+    display_name = each.value.display
+    condition_threshold {
+      filter = join(" AND ", [
+        "resource.type = \"datastream.googleapis.com/Stream\"",
+        "metric.type = \"${each.value.metric}\"",
+      ])
+      comparison      = each.value.comparison
+      threshold_value = each.value.threshold
+      duration        = each.value.duration
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = each.value.aligner
+      }
+    }
+  }
+
+  # Merges your manual notification channels with the automated PubSub channel
+  notification_channels = concat(
+    coalesce(var.notification_channels, []),
+    [google_monitoring_notification_channel.dlq_pubsub.name]
+  )
+}
+
+# -----------------------------------------------------------------------------------------
+# Cloud Function Configuration
+# -----------------------------------------------------------------------------------------
+module "dlq_handler_function_bucket_code" {
+  source     = "./modules/gcs"
+  project_id = var.project_id
+  location   = var.region
+  name       = "dlq-handler-function-code"
+  cors       = []
+  contents = [
+    {
+      name        = "dlq_handler_function_code.zip"
+      source_path = "${path.root}/files/dlq_handler_function_code.zip"
+      content     = ""
+    }
+  ]
+  force_destroy               = true
+  uniform_bucket_level_access = true
+}
+
+module "dlq_handler_function_service_account" {
+  source        = "./modules/service-account"
+  account_id    = "dlq-handler-function"
+  display_name  = "DLQ handler function Service Account"
+  project_id    = data.google_project.project.project_id
+  member_prefix = "serviceAccount"
+  permissions = [
+    "roles/secretmanager.secretAccessor",
+    "roles/storage.objectAdmin",
+    "roles/iam.serviceAccountTokenCreator"
+  ]
+}
+
+module "dlq_handler_function" {
+  source               = "./modules/cloud-run-function"
+  function_name        = "dlq-handler-function"
+  function_description = "A function to update media details in SQL database after the upload trigger"
+  location             = var.region
+  project_id           = var.project_id
+
+  build_config = {
+    handler = "handler"
+    runtime = "python312"
+    storage_source = {
+      bucket = module.dlq_handler_function_bucket_code.bucket_name
+      object = module.dlq_handler_function_bucket_code.bucket_objects["dlq_handler_function_code.zip"].name
+    }
+    build_environment_variables = {}
+  }
+
+  service_config = {
+    max_instance_count               = 10
+    min_instance_count               = 2
+    available_memory                 = "256M"
+    timeout_seconds                  = 60
+    max_instance_request_concurrency = 80
+    available_cpu                    = "1" # <-- Changed from "4" to "1"
+    ingress_settings                 = "ALLOW_INTERNAL_ONLY"
+    all_traffic_on_latest_revision   = true
+    service_account_email            = module.dlq_handler_function_service_account.sa_email
+  }
+
+  event_trigger = {
+    service_account_email = module.dlq_handler_function_service_account.sa_email
+    event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic          = module.carshub_media_bucket_pubsub.topic_id
+    retry_policy          = "RETRY_POLICY_RETRY"
+    event_filters         = []
+  }
 }
