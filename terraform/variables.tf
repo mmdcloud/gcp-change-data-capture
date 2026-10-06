@@ -109,6 +109,10 @@ variable "sql_proxy_network_tag" {
 ############################################################
 # Cloud SQL (MySQL)
 ############################################################
+variable "db_name" {
+  type    = string
+  default = "db"
+}
 
 variable "db_instance_name_prefix" {
   description = "Prefix for the Cloud SQL instance/database name; a random suffix is appended."
@@ -204,6 +208,11 @@ variable "db_point_in_time_recovery_enabled" {
   default     = true
 }
 
+variable "db_max_connections" {
+  type    = number
+  default = 1000
+}
+
 variable "db_database_flags" {
   description = "Cloud SQL database flags to set on the instance."
   type = list(object({
@@ -213,7 +222,6 @@ variable "db_database_flags" {
   default = [
     { name = "general_log", value = "off" },
     { name = "log_queries_not_using_indexes", value = "on" },
-    { name = "max_connections", value = "1000" },
     { name = "skip_show_database", value = "on" },
     { name = "slow_query_log", value = "on" },
     { name = "long_query_time", value = "2" },

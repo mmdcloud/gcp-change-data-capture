@@ -3,18 +3,13 @@
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
 
-data "google_compute_image" "ubuntu_2404" {
-  family  = var.image_family
-  project = var.image_project
-}
-
 resource "random_id" "sql_suffix" {
   byte_length = 3
 }
 
 locals {
   db_instance_name = "${var.db_instance_name_prefix}-${random_id.sql_suffix.hex}"
-  sql_proxy_zone   = "${var.region}-${var.sql_proxy_zone_suffix}"
+  dlq_dataset_id   = "${var.datastream_bq_dataset_id_prefix}_dlq"
 }
 
 # --------------------------------------------------------------------------
@@ -37,7 +32,7 @@ module "sql_password_secret" {
 module "datastream_reader_secret" {
   source              = "./modules/secret-manager"
   deletion_protection = false
-  secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
+  secret_data         = tostring(data.vault_generic_secret.sql.data["datastream_reader_password"])
   secret_id           = var.datastream_reader_secret_id
 }
 
@@ -88,7 +83,7 @@ module "vpc" {
 module "mysql" {
   source                      = "./modules/cloud-sql"
   name                        = local.db_instance_name
-  db_name                     = local.db_instance_name
+  db_name                     = var.db_name
   db_user                     = var.db_admin_username
   db_version                  = var.db_version
   location                    = var.region
@@ -123,18 +118,42 @@ module "mysql" {
       ]
     }
   ]
-  database_flags = var.db_database_flags
-  vpc_self_link  = module.vpc.self_link
-  vpc_id         = module.vpc.vpc_id
-  password       = module.sql_password_secret.secret_data
-  depends_on     = [module.sql_password_secret]
+  database_flags = concat(
+    var.db_database_flags,
+    [{ name = "max_connections", value = tostring(var.db_max_connections) }]
+  )
+  vpc_self_link = module.vpc.self_link
+  vpc_id        = module.vpc.vpc_id
+  password      = module.sql_password_secret.secret_data
+  depends_on    = [module.sql_password_secret]
 }
 
 resource "google_sql_user" "datastream_reader" {
-  name     = "datastream_reader"
-  instance = module.mysql.db_name
-  password = module.datastream_reader_secret.secret_data
-  host     = "%"
+  name       = "datastream_reader"
+  instance   = local.db_instance_name
+  password   = module.datastream_reader_secret.secret_data
+  host       = "%"
+  depends_on = [module.mysql]
+}
+
+# Automates the replication grants (opt-in; must run from inside the VPC, see scripts/).
+resource "terraform_data" "datastream_reader_grants" {
+  count = var.run_grant_script ? 1 : 0
+
+  triggers_replace = [google_sql_user.datastream_reader.id]
+
+  provisioner "local-exec" {
+    command = "${path.root}/scripts/grant_datastream_reader.sh"
+    environment = {
+      DB_HOST         = google_compute_address.sql_psc.address
+      DB_PORT         = tostring(var.sql_port)
+      DB_ADMIN_USER   = var.db_admin_username
+      DB_ADMIN_PASS   = module.sql_password_secret.secret_data
+      DATASTREAM_USER = google_sql_user.datastream_reader.name
+    }
+  }
+
+  depends_on = [google_compute_forwarding_rule.sql_psc]
 }
 
 resource "google_project_iam_member" "datastream_bq_editor" {
@@ -229,7 +248,7 @@ resource "google_datastream_stream" "stream" {
     mysql_source_config {
       include_objects {
         mysql_databases {
-          database = local.db_instance_name
+          database = var.db_name
 
           dynamic "mysql_tables" {
             for_each = var.datastream_tables
@@ -265,12 +284,12 @@ resource "google_datastream_stream" "stream" {
   depends_on = [
     google_datastream_connection_profile.source_connection_profile,
     google_datastream_connection_profile.destination_connection_profile,
+    google_project_iam_member.datastream_bq_editor,
+    google_project_iam_member.datastream_bq_jobuser,
+    terraform_data.datastream_reader_grants,
     module.mysql
   ]
 }
-
-#   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'datastream_reader'@'%';
-#   FLUSH PRIVILEGES;
 
 # --------------------------------------------------------------------------
 # Observability Configuration
@@ -359,10 +378,10 @@ locals {
       aligner    = "ALIGN_MEAN"
     }
     connections = {
-      display    = "Connections > 800 (80% of max_connections=1000)"
+      display    = "Connections > 80% of max_connections (${var.db_max_connections})"
       metric     = "cloudsql.googleapis.com/database/network/connections"
       comparison = "COMPARISON_GT"
-      threshold  = 800
+      threshold  = floor(var.db_max_connections * 0.8)
       duration   = "300s"
       aligner    = "ALIGN_MEAN"
     }
@@ -438,38 +457,13 @@ resource "google_monitoring_alert_policy" "cloudsql" {
   notification_channels = var.notification_channels
 }
 
-resource "google_monitoring_alert_policy" "datastream" {
-  for_each     = local.datastream_alerts
-  display_name = "Datastream: ${each.value.display}"
-  combiner     = "OR"
-
-  conditions {
-    display_name = each.value.display
-    condition_threshold {
-      filter = join(" AND ", [
-        "resource.type = \"datastream.googleapis.com/Stream\"",
-        "metric.type = \"${each.value.metric}\"",
-      ])
-      comparison      = each.value.comparison
-      threshold_value = each.value.threshold
-      duration        = each.value.duration
-      aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = each.value.aligner
-      }
-    }
-  }
-
-  notification_channels = var.notification_channels
-}
-
 # --------------------------------------------------------------------------
 # Dead Letter Queue(DLQ) Configuration
 # --------------------------------------------------------------------------
 module "dlq_dataset" {
-  source     = "./modules/bigquery"
-  dataset_id = "${var.datastream_bq_dataset_id_prefix}_dlq"
-  location   = var.region
+  source      = "./modules/bigquery"
+  dataset_id  = local.dlq_dataset_id
+  location    = var.region
   description = "Dead-letter storage for unhandled Datastream CDC errors"
   tables = [{
     table_id            = "datastream_failed_events"
@@ -487,6 +481,13 @@ module "dlq_dataset" {
       { name = "raw_payload", type = "STRING", mode = "NULLABLE" }
     ])
   }]
+}
+
+resource "google_bigquery_dataset_iam_member" "dlq_handler_writer" {
+  dataset_id = local.dlq_dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${module.dlq_handler_function_service_account.sa_email}"
+  depends_on = [module.dlq_dataset]
 }
 
 module "datastream_dlq" {
@@ -507,8 +508,6 @@ module "datastream_dlq" {
       ack_deadline_seconds       = 60
     }
   }
-
-  depends_on = [google_project_iam_member.pubsub_subscriber]
 }
 
 # --------------------------------------------------------------------------
@@ -518,10 +517,10 @@ resource "google_logging_project_sink" "datastream_error_sink" {
   name        = "datastream-cdc-error-sink"
   destination = "pubsub.googleapis.com/${module.datastream_dlq.id}"
   filter      = <<-EOT
-    resource.type="datastream.googleapis.com/Stream"
-    severity>=WARNING OR
-    (protoPayload.serviceName="datastream.googleapis.com" AND protoPayload.status.code!=0)
-  EOT
+  (resource.type="datastream.googleapis.com/Stream" AND severity>=WARNING)
+  OR
+  (protoPayload.serviceName="datastream.googleapis.com" AND protoPayload.status.code!=0)
+EOT
 
   unique_writer_identity = true
 }
@@ -536,6 +535,24 @@ resource "google_pubsub_topic_iam_member" "sink_publisher" {
 # --------------------------------------------------------------------------
 # Alert Channel for Pub/Sub (Link Monitoring Alert to DLQ Topic)
 # --------------------------------------------------------------------------
+resource "google_pubsub_topic" "datastream_alerts" {
+  name    = "datastream-alerts"
+  project = var.project_id
+}
+
+module "datastream_alerts" {
+  source                     = "./modules/pubsub"
+  topic_name                 = "datastream-cdc-dlq"
+  
+}
+
+# Monitoring's notification service agent must be able to publish
+resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
+  topic  = module.datastream_alerts.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+}
+
 resource "google_monitoring_notification_channel" "dlq_pubsub" {
   display_name = "Datastream DLQ PubSub Channel"
   type         = "pubsub"
@@ -571,7 +588,7 @@ resource "google_monitoring_alert_policy" "datastream" {
 
   # Merges your manual notification channels with the automated PubSub channel
   notification_channels = concat(
-    coalesce(var.notification_channels, []),
+    var.notification_channels == null ? [] : var.notification_channels,
     [google_monitoring_notification_channel.dlq_pubsub.name]
   )
 }
@@ -603,9 +620,9 @@ module "dlq_handler_function_service_account" {
   project_id    = data.google_project.project.project_id
   member_prefix = "serviceAccount"
   permissions = [
-    "roles/secretmanager.secretAccessor",
-    "roles/storage.objectAdmin",
-    "roles/iam.serviceAccountTokenCreator"
+    "roles/run.invoker",
+    "roles/eventarc.eventReceiver",
+    "roles/bigquery.jobUser"
   ]
 }
 
@@ -627,10 +644,15 @@ module "dlq_handler_function" {
   }
 
   service_config = {
-    max_instance_count               = 10
-    min_instance_count               = 2
-    available_memory                 = "256M"
-    timeout_seconds                  = 60
+    max_instance_count = 3
+    min_instance_count = 0
+    available_memory   = "256M"
+    timeout_seconds    = 60
+    service_environment_variables = {
+      BQ_PROJECT = var.project_id
+      BQ_DATASET = local.dlq_dataset_id
+      BQ_TABLE   = "datastream_failed_events"
+    }
     max_instance_request_concurrency = 80
     available_cpu                    = "1" # <-- Changed from "4" to "1"
     ingress_settings                 = "ALLOW_INTERNAL_ONLY"
@@ -641,7 +663,7 @@ module "dlq_handler_function" {
   event_trigger = {
     service_account_email = module.dlq_handler_function_service_account.sa_email
     event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
-    pubsub_topic          = module.carshub_media_bucket_pubsub.topic_id
+    pubsub_topic          = module.datastream_dlq.topic_id # was module.carshub_media_bucket_pubsub.topic_id
     retry_policy          = "RETRY_POLICY_RETRY"
     event_filters         = []
   }
