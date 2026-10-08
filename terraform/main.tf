@@ -50,7 +50,6 @@ module "vpc" {
       name                     = var.vpc_subnet_name
       region                   = var.region
       purpose                  = "PRIVATE"
-      role                     = "ACTIVE"
       private_ip_google_access = true
       ip_cidr_range            = var.vpc_subnet_cidr
     },
@@ -58,7 +57,6 @@ module "vpc" {
       name                     = var.psc_subnet_name
       region                   = var.region
       purpose                  = "PRIVATE"
-      role                     = "ACTIVE"
       private_ip_google_access = true
       ip_cidr_range            = var.psc_subnet_cidr
     }
@@ -122,10 +120,8 @@ module "mysql" {
     var.db_database_flags,
     [{ name = "max_connections", value = tostring(var.db_max_connections) }]
   )
-  vpc_self_link = module.vpc.self_link
-  vpc_id        = module.vpc.vpc_id
-  password      = module.sql_password_secret.secret_data
-  depends_on    = [module.sql_password_secret]
+  password   = module.sql_password_secret.secret_data
+  depends_on = [module.sql_password_secret]
 }
 
 resource "google_sql_user" "datastream_reader" {
@@ -493,11 +489,7 @@ resource "google_bigquery_dataset_iam_member" "dlq_handler_writer" {
 module "datastream_dlq" {
   source                     = "./modules/pubsub"
   topic_name                 = "datastream-cdc-dlq"
-  enable_schema              = true
-  schema_name                = "datastream-cdc-dlq-schema"
-  schema_type                = "AVRO"
-  schema_encoding            = "JSON"
-  schema_definition          = ""
+  enable_schema              = false
   message_retention_duration = "604800s"
 
   subscriptions = {
@@ -515,7 +507,7 @@ module "datastream_dlq" {
 # --------------------------------------------------------------------------
 resource "google_logging_project_sink" "datastream_error_sink" {
   name        = "datastream-cdc-error-sink"
-  destination = "pubsub.googleapis.com/${module.datastream_dlq.id}"
+  destination = "pubsub.googleapis.com/${module.datastream_dlq.topic_id}"
   filter      = <<-EOT
   (resource.type="datastream.googleapis.com/Stream" AND severity>=WARNING)
   OR
@@ -527,7 +519,7 @@ EOT
 
 # Authorize Log Sink to publish directly to the Pub/Sub DLQ Topic
 resource "google_pubsub_topic_iam_member" "sink_publisher" {
-  topic  = module.datastream_dlq.id
+  topic  = module.datastream_dlq.topic_id
   role   = "roles/pubsub.publisher"
   member = google_logging_project_sink.datastream_error_sink.writer_identity
 }
@@ -535,20 +527,15 @@ resource "google_pubsub_topic_iam_member" "sink_publisher" {
 # --------------------------------------------------------------------------
 # Alert Channel for Pub/Sub (Link Monitoring Alert to DLQ Topic)
 # --------------------------------------------------------------------------
-resource "google_pubsub_topic" "datastream_alerts" {
-  name    = "datastream-alerts"
-  project = var.project_id
-}
-
 module "datastream_alerts" {
-  source                     = "./modules/pubsub"
-  topic_name                 = "datastream-cdc-dlq"
-  
+  source     = "./modules/pubsub"
+  topic_name = "datastream-cdc-alerts"
+
 }
 
 # Monitoring's notification service agent must be able to publish
 resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
-  topic  = module.datastream_alerts.name
+  topic  = module.datastream_alerts.topic_name
   role   = "roles/pubsub.publisher"
   member = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
 }
@@ -558,7 +545,7 @@ resource "google_monitoring_notification_channel" "dlq_pubsub" {
   type         = "pubsub"
 
   labels = {
-    topic = module.datastream_dlq.id
+    topic = module.datastream_dlq.topic_id
   }
 }
 
@@ -605,7 +592,7 @@ module "dlq_handler_function_bucket_code" {
   contents = [
     {
       name        = "dlq_handler_function_code.zip"
-      source_path = "${path.root}/files/dlq_handler_function_code.zip"
+      source_path = "${path.module}/files/dlq_handler_function_code.zip"
       content     = ""
     }
   ]
@@ -634,7 +621,7 @@ module "dlq_handler_function" {
   project_id           = var.project_id
 
   build_config = {
-    handler = "handler"
+    handler = "handle_dlq_event"
     runtime = "python312"
     storage_source = {
       bucket = module.dlq_handler_function_bucket_code.bucket_name
@@ -663,7 +650,7 @@ module "dlq_handler_function" {
   event_trigger = {
     service_account_email = module.dlq_handler_function_service_account.sa_email
     event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
-    pubsub_topic          = module.datastream_dlq.topic_id # was module.carshub_media_bucket_pubsub.topic_id
+    pubsub_topic          = module.datastream_dlq.topic_id
     retry_policy          = "RETRY_POLICY_RETRY"
     event_filters         = []
   }

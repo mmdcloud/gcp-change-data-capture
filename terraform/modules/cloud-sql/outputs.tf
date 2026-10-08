@@ -23,5 +23,5 @@ output "psc_service_attachment_link" {
 }
 
 output "private_vpc_connection_peering" {
-  value = google_service_networking_connection.private_vpc_connection.peering
+  value = try(google_service_networking_connection.private_vpc_connection[0].peering, null)
 }

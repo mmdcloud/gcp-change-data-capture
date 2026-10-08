@@ -51,6 +51,7 @@
 variable "vpc_id" {
   description = "Self link / ID of the VPC network to peer for private services access."
   type        = string
+  default     = null
 }
 
 variable "vpc_self_link" {

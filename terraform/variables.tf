@@ -336,3 +336,9 @@ variable "notification_channels" {
   type    = list(string)
   default = []
 }
+
+variable "run_grant_script" {
+  description = "Whether to run the datastream reader grant script."
+  type        = bool
+  default     = false
+}
