@@ -32,7 +32,7 @@ module "sql_password_secret" {
 module "datastream_reader_secret" {
   source              = "./modules/secret-manager"
   deletion_protection = false
-  secret_data         = tostring(data.vault_generic_secret.sql.data["datastream_reader_password"])
+  secret_data         = tostring(try(data.vault_generic_secret.sql.data["password"]))
   secret_id           = var.datastream_reader_secret_id
 }
 
@@ -103,11 +103,10 @@ module "mysql" {
 
   backup_configuration = [
     {
-      enabled                        = true
-      binary_log_enabled             = true
-      start_time                     = var.db_backup_start_time
-      location                       = var.region
-      point_in_time_recovery_enabled = var.db_point_in_time_recovery_enabled
+      enabled            = true
+      binary_log_enabled = true
+      start_time         = var.db_backup_start_time
+      location           = var.region
       backup_retention_settings = [
         {
           retained_backups = var.db_backup_retained_count
