@@ -32,7 +32,7 @@ module "sql_password_secret" {
 module "datastream_reader_secret" {
   source              = "./modules/secret-manager"
   deletion_protection = false
-  secret_data         = tostring(try(data.vault_generic_secret.sql.data["password"]))
+  secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id           = var.datastream_reader_secret_id
 }
 
@@ -402,7 +402,7 @@ locals {
       comparison = "COMPARISON_LT"
       threshold  = 1
       duration   = "300s"
-      aligner    = "ALIGN_FRACTION_TRUE"
+      aligner    = "ALIGN_MEAN"
     }
   }
 
