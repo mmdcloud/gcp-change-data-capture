@@ -71,39 +71,18 @@ variable "vpc_subnet_cidr" {
 variable "psc_subnet_name" {
   description = "Name of the subnet hosting the Datastream SQL proxy VM."
   type        = string
-  default     = "proxy-vm-subnet"
+  default     = "datastream-psc-subnet"
+}
+
+variable "protect_resources" {
+  type    = bool
+  default = true
 }
 
 variable "psc_subnet_cidr" {
   description = "CIDR range for the proxy VM subnet."
   type        = string
   default     = "10.10.0.0/24" # Important : should not be 10.1.0.0/16 and 10.2.2.0/24 because these are reserved for datastream internal ranges
-}
-
-variable "datastream_private_connection_cidr" {
-  description = <<-EOT
-    CIDR reserved for Datastream's VPC peering (private connection) and used as the
-    firewall source range that allows the proxy to be reached. Must be a /29 or
-    larger unused range not overlapping any existing subnet or peered range.
-  EOT
-  type        = string
-  default     = "10.99.0.0/29"
-}
-
-variable "iap_ssh_source_range" {
-  description = <<-EOT
-    Source range allowed to SSH to the proxy VM over Identity-Aware Proxy TCP
-    forwarding. This is Google's fixed IAP range and should not normally be
-    changed; exposed as a variable only for non-standard network setups.
-  EOT
-  type        = string
-  default     = "35.235.240.0/20"
-}
-
-variable "sql_proxy_network_tag" {
-  description = "Network tag applied to the proxy VM and matched by its firewall rules."
-  type        = string
-  default     = "datastream-sql-proxy"
 }
 
 ############################################################
@@ -184,12 +163,6 @@ variable "db_ipv4_enabled" {
   default     = false
 }
 
-variable "db_deletion_protection_enabled" {
-  description = "Whether Cloud SQL's own deletion protection setting is enabled."
-  type        = bool
-  default     = true
-}
-
 variable "db_backup_start_time" {
   description = "Start time (HH:MM, UTC) for the daily automated backup window."
   type        = string
@@ -200,12 +173,6 @@ variable "db_backup_retained_count" {
   description = "Number of automated backups to retain."
   type        = number
   default     = 30
-}
-
-variable "db_point_in_time_recovery_enabled" {
-  description = "Whether point-in-time recovery (binary log based) is enabled."
-  type        = bool
-  default     = true
 }
 
 variable "db_max_connections" {
@@ -226,7 +193,7 @@ variable "db_database_flags" {
     { name = "slow_query_log", value = "on" },
     { name = "long_query_time", value = "2" },
     { name = "log_output", value = "FILE" },
-    { name = "binlog_expire_logs_seconds", value = "86400" },
+    { name = "binlog_expire_logs_seconds", value = "604800" },
     { name = "binlog_row_image", value = "full" },
   ]
 }
@@ -234,41 +201,6 @@ variable "db_database_flags" {
 ############################################################
 # Datastream SQL proxy VM
 ############################################################
-
-variable "image_family" {
-  description = "Image family for the proxy VM's boot disk (e.g. ubuntu-2404-lts-amd64)."
-  type        = string
-}
-
-variable "image_project" {
-  description = "Project that owns the boot disk image family (e.g. ubuntu-os-cloud)."
-  type        = string
-}
-
-variable "sql_proxy_machine_type" {
-  description = "Machine type for the Datastream SQL proxy VM."
-  type        = string
-  default     = "e2-micro"
-}
-
-variable "sql_proxy_zone_suffix" {
-  description = "Zone suffix appended to var.region for the proxy VM"
-  type        = string
-  default     = "a"
-}
-
-variable "instance_boot_disk_size_gb" {
-  description = "Boot disk size, in GB, for the proxy VM."
-  type        = number
-  default     = 20
-}
-
-variable "instance_boot_disk_type" {
-  description = "Boot disk type for the proxy VM."
-  type        = string
-  default     = "pd-balanced"
-}
-
 variable "sql_port" {
   description = "TCP port the proxy listens on and forwards to Cloud SQL. Must match db_port."
   type        = number
@@ -339,6 +271,22 @@ variable "notification_channels" {
 
 variable "run_grant_script" {
   description = "Whether to run the datastream reader grant script."
+  type        = bool
+  default     = false
+}
+
+variable "alert_email" {
+  type    = string
+  default = ""
+}
+
+variable "vault_datastream_reader_secret_path" {
+  type    = string
+  default = "secret/datastream_reader"
+}
+
+variable "grants_applied" {
+  description = "Set true once datastream_reader has replication grants (script run manually)."
   type        = bool
   default     = false
 }

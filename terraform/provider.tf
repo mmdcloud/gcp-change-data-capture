@@ -13,6 +13,7 @@ terraform {
       version = "~> 4.0"
     }
   }
+  backend "gcs" {}
 }
 
 provider "google" {

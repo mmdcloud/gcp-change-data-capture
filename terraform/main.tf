@@ -1,4 +1,32 @@
 # --------------------------------------------------------------------------
+# Enabling APIs
+# --------------------------------------------------------------------------
+locals {
+  apis = [
+    "compute.googleapis.com",
+    "sqladmin.googleapis.com",
+    "datastream.googleapis.com",
+    "bigquery.googleapis.com",
+    "secretmanager.googleapis.com",
+    "pubsub.googleapis.com",
+    "logging.googleapis.com",
+    "monitoring.googleapis.com",
+    "run.googleapis.com",
+    "cloudfunctions.googleapis.com",
+    "eventarc.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "storage.googleapis.com",
+  ]
+}
+
+resource "google_project_service" "apis" {
+  for_each           = toset(local.apis)
+  service            = each.value
+  disable_on_destroy = false
+}
+
+# --------------------------------------------------------------------------
 # Data resource blocks
 # --------------------------------------------------------------------------
 data "google_project" "project" {}
@@ -19,20 +47,28 @@ data "vault_generic_secret" "sql" {
   path = var.vault_secret_path
 }
 
+data "vault_generic_secret" "datastream_reader" {
+  path = var.vault_datastream_reader_secret_path
+}
+
+locals {
+  grants_ready = var.run_grant_script || var.grants_applied
+}
+
 # --------------------------------------------------------------------------
 # Secret Manager
 # --------------------------------------------------------------------------
 module "sql_password_secret" {
   source              = "./modules/secret-manager"
-  deletion_protection = false
+  deletion_protection = var.protect_resources
   secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
   secret_id           = var.db_password_secret_id
 }
 
 module "datastream_reader_secret" {
   source              = "./modules/secret-manager"
-  deletion_protection = false
-  secret_data         = tostring(data.vault_generic_secret.sql.data["password"])
+  deletion_protection = var.protect_resources
+  secret_data         = tostring(data.vault_generic_secret.datastream_reader.data["password"])
   secret_id           = var.datastream_reader_secret_id
 }
 
@@ -92,7 +128,7 @@ module "mysql" {
   disk_autoresize             = var.db_disk_autoresize
   disk_autoresize_limit       = var.db_disk_autoresize_limit_gb
   ipv4_enabled                = var.db_ipv4_enabled
-  deletion_protection_enabled = var.db_deletion_protection_enabled
+  deletion_protection_enabled = var.protect_resources
 
   psc_config = [
     {
@@ -235,7 +271,7 @@ resource "google_datastream_stream" "stream" {
   location     = var.region
   display_name = var.datastream_display_name
 
-  desired_state = var.datastream_desired_state
+  desired_state = local.grants_ready ? var.datastream_desired_state : "NOT_STARTED"
 
   source_config {
     source_connection_profile = google_datastream_connection_profile.source_connection_profile.id
@@ -462,7 +498,7 @@ module "dlq_dataset" {
   description = "Dead-letter storage for unhandled Datastream CDC errors"
   tables = [{
     table_id            = "datastream_failed_events"
-    deletion_protection = false
+    deletion_protection = var.protect_resources
     time_partitioning = {
       field = "timestamp"
       type  = "DAY"
@@ -534,22 +570,42 @@ module "datastream_alerts" {
 
 # Monitoring's notification service agent must be able to publish
 resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
-  topic  = module.datastream_alerts.topic_name
+  topic  = module.datastream_alerts.topic_id
   role   = "roles/pubsub.publisher"
   member = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
 }
 
-resource "google_monitoring_notification_channel" "dlq_pubsub" {
-  display_name = "Datastream DLQ PubSub Channel"
-  type         = "pubsub"
+# resource "google_monitoring_notification_channel" "dlq_pubsub" {
+#   display_name = "Datastream DLQ PubSub Channel"
+#   type         = "pubsub"
 
-  labels = {
-    topic = module.datastream_dlq.topic_id
-  }
+#   labels = {
+#     topic = module.datastream_dlq.topic_id
+#   }
+# }
+
+resource "google_monitoring_notification_channel" "alerts_pubsub" {
+  display_name = "CDC alerts (Pub/Sub)"
+  type         = "pubsub"
+  labels       = { topic = module.datastream_alerts.topic_id }
+  depends_on   = [google_pubsub_topic_iam_member.monitoring_publisher]
 }
 
-# Update notification channels on the existing Datastream alert policy:
-# (Replace your existing resource declaration with this updated version)
+resource "google_monitoring_notification_channel" "email" {
+  count        = var.alert_email == "" ? 0 : 1
+  display_name = "CDC alerts (email)"
+  type         = "email"
+  labels       = { email_address = var.alert_email }
+}
+
+locals {
+  alert_channels = concat(
+    var.notification_channels,
+    [google_monitoring_notification_channel.alerts_pubsub.name],
+    google_monitoring_notification_channel.email[*].name,
+  )
+}
+
 resource "google_monitoring_alert_policy" "datastream" {
   for_each     = local.datastream_alerts
   display_name = "Datastream: ${each.value.display}"
@@ -573,10 +629,7 @@ resource "google_monitoring_alert_policy" "datastream" {
   }
 
   # Merges your manual notification channels with the automated PubSub channel
-  notification_channels = concat(
-    var.notification_channels == null ? [] : var.notification_channels,
-    [google_monitoring_notification_channel.dlq_pubsub.name]
-  )
+  notification_channels = local.alert_channels
 }
 
 # -----------------------------------------------------------------------------------------
@@ -595,7 +648,7 @@ module "dlq_handler_function_bucket_code" {
       content     = ""
     }
   ]
-  force_destroy               = true
+  force_destroy               = !var.protect_resources
   uniform_bucket_level_access = true
 }
 
@@ -615,7 +668,7 @@ module "dlq_handler_function_service_account" {
 module "dlq_handler_function" {
   source               = "./modules/cloud-run-function"
   function_name        = "dlq-handler-function"
-  function_description = "A function to update media details in SQL database after the upload trigger"
+  function_description = "Archives Datastream error log events to BigQuery (error sink handler)"
   location             = var.region
   project_id           = var.project_id
 
