@@ -109,6 +109,8 @@ module "vpc" {
       ]
     }
   ]
+
+  depends_on = [google_project_service.apis]
 }
 
 # --------------------------------------------------------------------------
@@ -156,15 +158,22 @@ module "mysql" {
     [{ name = "max_connections", value = tostring(var.db_max_connections) }]
   )
   password   = module.sql_password_secret.secret_data
-  depends_on = [module.sql_password_secret]
+  depends_on = [module.sql_password_secret, google_project_service.apis]
+}
+
+ephemeral "vault_kv_secret_v2" "sql" {
+  mount = "secret"
+  name  = "sql"
 }
 
 resource "google_sql_user" "datastream_reader" {
-  name       = "datastream_reader"
-  instance   = local.db_instance_name
-  password   = module.datastream_reader_secret.secret_data
-  host       = "%"
-  depends_on = [module.mysql]
+  name                = "datastream_reader"
+  instance            = local.db_instance_name
+  password            = module.datastream_reader_secret.secret_data
+  host                = "%"
+  password_wo         = ephemeral.vault_kv_secret_v2.datastream_reader.data["password"]
+  password_wo_version = 1 # bump to rotate
+  depends_on          = [module.mysql]
 }
 
 # Automates the replication grants (opt-in; must run from inside the VPC, see scripts/).
@@ -225,6 +234,14 @@ resource "google_compute_forwarding_rule" "sql_psc" {
   target                = module.mysql.psc_service_attachment_link
 }
 
+module "cdc_dataset" {
+  source      = "./modules/bigquery"
+  dataset_id  = "cdc_${var.environment}"
+  description = ""
+  location    = var.region
+  tables      = []
+}
+
 # --------------------------------------------------------------------------
 # Datastream Configuration
 # --------------------------------------------------------------------------
@@ -236,7 +253,7 @@ resource "google_datastream_private_connection" "private_connection" {
   psc_interface_config {
     network_attachment = google_compute_network_attachment.datastream.id
   }
-  depends_on = [google_compute_network_attachment.datastream]
+  depends_on = [google_compute_network_attachment.datastream, google_project_service.apis]
 }
 
 resource "google_datastream_connection_profile" "source_connection_profile" {
@@ -249,6 +266,10 @@ resource "google_datastream_connection_profile" "source_connection_profile" {
     port     = var.sql_port
     username = google_sql_user.datastream_reader.name
     password = module.datastream_reader_secret.secret_data
+
+    ssl_config {
+      ca_certificate = module.mysql.server_ca_cert
+    }
   }
 
   private_connectivity {
@@ -299,12 +320,17 @@ resource "google_datastream_stream" "stream" {
     destination_connection_profile = google_datastream_connection_profile.destination_connection_profile.id
 
     bigquery_destination_config {
-      source_hierarchy_datasets {
-        dataset_template {
-          location          = var.region
-          dataset_id_prefix = var.datastream_bq_dataset_id_prefix
-        }
+
+      single_target_dataset {
+        dataset_id = "projects/${var.project_id}/datasets/${module.cdc_dataset.dataset_id}"
       }
+
+      # source_hierarchy_datasets {
+      #   dataset_template {
+      #     location          = var.region
+      #     dataset_id_prefix = var.datastream_bq_dataset_id_prefix
+      #   }
+      # }
 
       data_freshness = var.datastream_data_freshness
     }
@@ -440,16 +466,48 @@ locals {
       duration   = "300s"
       aligner    = "ALIGN_MEAN"
     }
+    error_log = {
+      display    = "MySQL error log entries > 0"
+      metric     = "logging.googleapis.com/user/cloudsql_mysql_error_log"
+      comparison = "COMPARISON_GT"
+      threshold  = 0
+      duration   = "0s"
+      aligner    = "ALIGN_SUM"
+    }
+    slow_queries = {
+      display    = "Slow queries > 20 in 5m"
+      metric     = "logging.googleapis.com/user/cloudsql_slow_queries"
+      comparison = "COMPARISON_GT"
+      threshold  = 20
+      duration   = "300s"
+      aligner    = "ALIGN_SUM"
+    }
+    backup_failures = {
+      display    = "Backup failures > 0"
+      metric     = "logging.googleapis.com/user/cloudsql_backup_failures"
+      comparison = "COMPARISON_GT"
+      threshold  = 0
+      duration   = "0s"
+      aligner    = "ALIGN_SUM"
+    }
   }
 
   datastream_alerts = {
     freshness = {
-      display    = "Data freshness > 10 min"
+      display    = "Data freshness > 2x target"
       metric     = "datastream.googleapis.com/stream/freshness"
       comparison = "COMPARISON_GT"
-      threshold  = 600
+      threshold  = tonumber(trimsuffix(var.datastream_data_freshness, "s")) * 2 # 1800s with a 900s target
       duration   = "600s"
       aligner    = "ALIGN_MAX"
+    }
+    stream_errors = {
+      display    = "Stream errors > 0"
+      metric     = "logging.googleapis.com/user/datastream_errors"
+      comparison = "COMPARISON_GT"
+      threshold  = 0
+      duration   = "0s"
+      aligner    = "ALIGN_SUM"
     }
     unsupported = {
       display    = "Unsupported events > 0"
@@ -460,32 +518,6 @@ locals {
       aligner    = "ALIGN_SUM"
     }
   }
-}
-
-resource "google_monitoring_alert_policy" "cloudsql" {
-  for_each     = local.cloudsql_alerts
-  display_name = "Cloud SQL: ${each.value.display}"
-  combiner     = "OR"
-
-  conditions {
-    display_name = each.value.display
-    condition_threshold {
-      filter = join(" AND ", [
-        "resource.type = \"cloudsql_database\"",
-        "resource.labels.database_id = \"${var.project_id}:${local.db_instance_name}\"",
-        "metric.type = \"${each.value.metric}\"",
-      ])
-      comparison      = each.value.comparison
-      threshold_value = each.value.threshold
-      duration        = each.value.duration
-      aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = each.value.aligner
-      }
-    }
-  }
-
-  notification_channels = var.notification_channels
 }
 
 # --------------------------------------------------------------------------
@@ -512,6 +544,8 @@ module "dlq_dataset" {
       { name = "raw_payload", type = "STRING", mode = "NULLABLE" }
     ])
   }]
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_bigquery_dataset_iam_member" "dlq_handler_writer" {
@@ -527,15 +561,18 @@ module "datastream_dlq" {
   enable_schema              = false
   message_retention_duration = "604800s"
 
-  subscriptions = {
-    "datastream-cdc-dlq-sub" = {
-      subscription_name          = "datastream-cdc-dlq-sub"
-      message_retention_duration = "604800s"
-      retain_acked_messages      = false
-      ack_deadline_seconds       = 60
-    }
-  }
+  # subscriptions = {
+  #   "datastream-cdc-dlq-sub" = {
+  #     subscription_name          = "datastream-cdc-dlq-sub"
+  #     message_retention_duration = "604800s"
+  #     retain_acked_messages      = false
+  #     ack_deadline_seconds       = 60
+  #   }
+  # }
+
+  depends_on = [google_project_service.apis]
 }
+
 
 # --------------------------------------------------------------------------
 # Log Sink: Intercept Datastream Operational & Engine Errors
@@ -606,6 +643,37 @@ locals {
   )
 }
 
+resource "google_monitoring_alert_policy" "cloudsql" {
+  for_each     = local.cloudsql_alerts
+  display_name = "Cloud SQL: ${each.value.display}"
+  combiner     = "OR"
+
+  conditions {
+    display_name = each.value.display
+    condition_threshold {
+      filter = join(" AND ", [
+        "resource.type = \"cloudsql_database\"",
+        "resource.labels.database_id = \"${var.project_id}:${local.db_instance_name}\"",
+        "metric.type = \"${each.value.metric}\"",
+      ])
+      comparison      = each.value.comparison
+      threshold_value = each.value.threshold
+      duration        = each.value.duration
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = each.value.aligner
+      }
+    }
+  }
+
+  notification_channels = var.notification_channels
+
+  depends_on = [
+    module.cloudsql_error_log, module.cloudsql_slow_queries,
+    module.cloudsql_backup_failures, module.datastream_errors,
+  ]
+}
+
 resource "google_monitoring_alert_policy" "datastream" {
   for_each     = local.datastream_alerts
   display_name = "Datastream: ${each.value.display}"
@@ -629,6 +697,30 @@ resource "google_monitoring_alert_policy" "datastream" {
   }
 
   # Merges your manual notification channels with the automated PubSub channel
+  notification_channels = local.alert_channels
+
+  depends_on = [
+    module.cloudsql_error_log, module.cloudsql_slow_queries,
+    module.cloudsql_backup_failures, module.datastream_errors,
+  ]
+}
+
+resource "google_monitoring_alert_policy" "error_backlog" {
+  display_name = "Error handler: oldest unacked > 10m"
+  combiner     = "OR"
+  conditions {
+    display_name = "oldest unacked message"
+    condition_threshold {
+      filter          = "resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"datastream-cdc-error-handler\" AND metric.type=\"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 600
+      duration        = "300s"
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
   notification_channels = local.alert_channels
 }
 
@@ -659,9 +751,7 @@ module "dlq_handler_function_service_account" {
   project_id    = data.google_project.project.project_id
   member_prefix = "serviceAccount"
   permissions = [
-    "roles/run.invoker",
-    "roles/eventarc.eventReceiver",
-    "roles/bigquery.jobUser"
+    "roles/eventarc.eventReceiver"
   ]
 }
 
@@ -699,11 +789,50 @@ module "dlq_handler_function" {
     service_account_email            = module.dlq_handler_function_service_account.sa_email
   }
 
-  event_trigger = {
-    service_account_email = module.dlq_handler_function_service_account.sa_email
-    event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
-    pubsub_topic          = module.datastream_dlq.topic_id
-    retry_policy          = "RETRY_POLICY_RETRY"
-    event_filters         = []
+  # event_trigger = {
+  #   service_account_email = module.dlq_handler_function_service_account.sa_email
+  #   event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
+  #   pubsub_topic          = module.datastream_dlq.topic_id
+  #   retry_policy          = "RETRY_POLICY_RETRY"
+  #   event_filters         = []
+  # }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_run_v2_service_iam_member" "invoker" {
+  project    = var.project_id
+  location   = var.region
+  name       = "dlq-handler-function" # service name = function name for gen2
+  role       = "roles/run.invoker"
+  member     = "serviceAccount:${module.dlq_handler_function_service_account.sa_email}"
+  depends_on = [module.dlq_handler_function]
+}
+
+resource "google_pubsub_topic" "error_dead_letter" {
+  name = "datastream-cdc-error-dead-letter"
+}
+
+resource "google_pubsub_subscription" "error_handler_push" {
+  name  = "datastream-cdc-error-handler"
+  topic = module.datastream_dlq.topic_id
+
+  ack_deadline_seconds = 60
+
+  push_config {
+    push_endpoint = module.dlq_handler_function.function_uri # [module] output
+    oidc_token {
+      service_account_email = module.dlq_handler_function_service_account.sa_email
+    }
+  }
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "300s"
+  }
+
+  dead_letter_policy {
+    dead_letter_topic     = google_pubsub_topic.error_dead_letter.id
+    max_delivery_attempts = 5
   }
 }
