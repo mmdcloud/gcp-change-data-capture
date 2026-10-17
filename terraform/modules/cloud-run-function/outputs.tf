@@ -23,3 +23,7 @@ output "function_state" {
 output "function_update_time" {
   value = google_cloudfunctions2_function.function.update_time
 }
+
+output "function_uri" {
+  value = google_cloudfunctions2_function.function.service_config[0].uri
+}

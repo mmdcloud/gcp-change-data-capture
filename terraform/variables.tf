@@ -69,18 +69,19 @@ variable "vpc_subnet_cidr" {
 }
 
 variable "psc_subnet_name" {
-  description = "Name of the subnet hosting the Datastream SQL proxy VM."
+  description = "Name of the subnet hosting the Datastream PSC Subnet"
   type        = string
   default     = "datastream-psc-subnet"
 }
 
 variable "protect_resources" {
   type    = bool
+  description = "Single variable to control deletion of resources"
   default = true
 }
 
 variable "psc_subnet_cidr" {
-  description = "CIDR range for the proxy VM subnet."
+  description = "CIDR range for the PSC subnet."
   type        = string
   default     = "10.10.0.0/24" # Important : should not be 10.1.0.0/16 and 10.2.2.0/24 because these are reserved for datastream internal ranges
 }
@@ -199,7 +200,7 @@ variable "db_database_flags" {
 }
 
 ############################################################
-# Datastream SQL proxy VM
+# Datastream SQL Port
 ############################################################
 variable "sql_port" {
   description = "TCP port the proxy listens on and forwards to Cloud SQL. Must match db_port."

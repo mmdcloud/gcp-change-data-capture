@@ -51,7 +51,7 @@ resource "google_sql_database_instance" "db_instance" {
       project       = restore_backup_context.value.project
     }
   }
-
+  
   dynamic "replica_configuration" {
     for_each = var.replica_configuration != null ? [var.replica_configuration] : []
     content {

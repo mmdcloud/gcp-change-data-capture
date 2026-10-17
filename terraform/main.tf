@@ -26,6 +26,12 @@ resource "google_project_service" "apis" {
   disable_on_destroy = false
 }
 
+resource "google_project_service_identity" "datastream" {
+  project    = var.project_id
+  service    = "datastream.googleapis.com"
+  depends_on = [google_project_service.apis]
+}
+
 # --------------------------------------------------------------------------
 # Data resource blocks
 # --------------------------------------------------------------------------
@@ -104,7 +110,7 @@ module "vpc" {
       allow_list = [
         {
           protocol = "tcp"
-          ports    = ["3306"]
+          ports    = [tostring(var.sql_port)]
         }
       ]
     }
@@ -139,6 +145,19 @@ module "mysql" {
     }
   ]
 
+  insights_config = {
+    query_insights_enabled  = true
+    query_plans_per_minute  = 5
+    query_string_length     = 1024
+    record_application_tags = true
+  }
+
+  maintenance_window = {
+    day          = 7  # Sunday
+    hour         = 21 # UTC (~02:30 IST Monday)
+    update_track = "stable"
+  }
+
   backup_configuration = [
     {
       enabled            = true
@@ -161,19 +180,12 @@ module "mysql" {
   depends_on = [module.sql_password_secret, google_project_service.apis]
 }
 
-ephemeral "vault_kv_secret_v2" "sql" {
-  mount = "secret"
-  name  = "sql"
-}
-
 resource "google_sql_user" "datastream_reader" {
-  name                = "datastream_reader"
-  instance            = local.db_instance_name
-  password            = module.datastream_reader_secret.secret_data
-  host                = "%"
-  password_wo         = ephemeral.vault_kv_secret_v2.datastream_reader.data["password"]
-  password_wo_version = 1 # bump to rotate
-  depends_on          = [module.mysql]
+  name       = "datastream_reader"
+  instance   = local.db_instance_name
+  password   = module.datastream_reader_secret.secret_data
+  host       = "%"
+  depends_on = [module.mysql]
 }
 
 # Automates the replication grants (opt-in; must run from inside the VPC, see scripts/).
@@ -197,16 +209,19 @@ resource "terraform_data" "datastream_reader_grants" {
 }
 
 resource "google_project_iam_member" "datastream_bq_editor" {
-  project = var.project_id
-  role    = "roles/bigquery.dataEditor"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+  project    = var.project_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+  depends_on = [google_project_service_identity.datastream]
 }
 
 resource "google_project_iam_member" "datastream_bq_jobuser" {
-  project = var.project_id
-  role    = "roles/bigquery.jobUser"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+  project    = var.project_id
+  role       = "roles/bigquery.jobUser"
+  member     = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-datastream.iam.gserviceaccount.com"
+  depends_on = [google_project_service_identity.datastream]
 }
+
 
 # --------------------------------------------------------------------------
 # Private Service Connect Configuration
@@ -240,6 +255,7 @@ module "cdc_dataset" {
   description = ""
   location    = var.region
   tables      = []
+  depends_on  = [google_project_service.apis]
 }
 
 # --------------------------------------------------------------------------
@@ -587,6 +603,7 @@ resource "google_logging_project_sink" "datastream_error_sink" {
 EOT
 
   unique_writer_identity = true
+  depends_on             = [google_project_service.apis]
 }
 
 # Authorize Log Sink to publish directly to the Pub/Sub DLQ Topic
@@ -602,7 +619,7 @@ resource "google_pubsub_topic_iam_member" "sink_publisher" {
 module "datastream_alerts" {
   source     = "./modules/pubsub"
   topic_name = "datastream-cdc-alerts"
-
+  depends_on = [google_project_service.apis]
 }
 
 # Monitoring's notification service agent must be able to publish
@@ -666,7 +683,7 @@ resource "google_monitoring_alert_policy" "cloudsql" {
     }
   }
 
-  notification_channels = var.notification_channels
+  notification_channels = local.alert_channels
 
   depends_on = [
     module.cloudsql_error_log, module.cloudsql_slow_queries,
@@ -750,9 +767,7 @@ module "dlq_handler_function_service_account" {
   display_name  = "DLQ handler function Service Account"
   project_id    = data.google_project.project.project_id
   member_prefix = "serviceAccount"
-  permissions = [
-    "roles/eventarc.eventReceiver"
-  ]
+  permissions = []
 }
 
 module "dlq_handler_function" {
@@ -809,8 +824,51 @@ resource "google_cloud_run_v2_service_iam_member" "invoker" {
   depends_on = [module.dlq_handler_function]
 }
 
+locals {
+  pubsub_agent = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
 resource "google_pubsub_topic" "error_dead_letter" {
-  name = "datastream-cdc-error-dead-letter"
+  name       = "datastream-cdc-error-dead-letter"
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_pubsub_subscription" "error_dead_letter_sub" {
+  name                       = "datastream-cdc-error-dead-letter-sub"
+  topic                      = google_pubsub_topic.error_dead_letter.id
+  message_retention_duration = "604800s"
+  expiration_policy { ttl = "" } # never expires
+}
+
+resource "google_pubsub_topic_iam_member" "dl_publisher" {
+  topic  = google_pubsub_topic.error_dead_letter.id
+  role   = "roles/pubsub.publisher"
+  member = local.pubsub_agent
+}
+
+resource "google_pubsub_subscription_iam_member" "dl_subscriber" {
+  subscription = google_pubsub_subscription.error_handler_push.id
+  role         = "roles/pubsub.subscriber"
+  member       = local.pubsub_agent
+}
+
+resource "google_monitoring_alert_policy" "error_dead_letter" {
+  display_name = "Error handler: messages in dead-letter"
+  combiner     = "OR"
+  conditions {
+    display_name = "undelivered dead-letter messages"
+    condition_threshold {
+      filter          = "resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"${google_pubsub_subscription.error_dead_letter_sub.name}\" AND metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "60s"
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+  notification_channels = local.alert_channels
 }
 
 resource "google_pubsub_subscription" "error_handler_push" {

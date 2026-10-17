@@ -554,7 +554,7 @@ variable "server_certificate_rotation_mode" {
 variable "ssl_mode" {
   description = "SSL enforcement mode for connections, e.g. ENCRYPTED_ONLY, TRUSTED_CLIENT_CERTIFICATE_REQUIRED."
   type        = string
-  default     = null
+  default     = "ENCRYPTED_ONLY"
 }
 
 variable "authorized_networks" {

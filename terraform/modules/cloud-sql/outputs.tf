@@ -29,3 +29,8 @@ output "server_ca_cert" {
 output "private_vpc_connection_peering" {
   value = try(google_service_networking_connection.private_vpc_connection[0].peering, null)
 }
+
+
+output "server_ca_cert" {
+  value = google_sql_database_instance.db_instance.server_ca_cert[0].cert
+}
