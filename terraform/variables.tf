@@ -75,9 +75,9 @@ variable "psc_subnet_name" {
 }
 
 variable "protect_resources" {
-  type    = bool
+  type        = bool
   description = "Single variable to control deletion of resources"
-  default = true
+  default     = true
 }
 
 variable "psc_subnet_cidr" {

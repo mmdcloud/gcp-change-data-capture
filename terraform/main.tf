@@ -27,6 +27,7 @@ resource "google_project_service" "apis" {
 }
 
 resource "google_project_service_identity" "datastream" {
+  provider = google-beta
   project    = var.project_id
   service    = "datastream.googleapis.com"
   depends_on = [google_project_service.apis]
@@ -432,6 +433,18 @@ module "datastream_errors" {
   label_extractors = {}
 }
 
+# Wait for log-based metric descriptors to propagate to Cloud Monitoring
+resource "time_sleep" "wait_for_log_metrics" {
+  create_duration = "120s"
+
+  depends_on = [
+    module.cloudsql_error_log,
+    module.cloudsql_slow_queries,
+    module.cloudsql_backup_failures,
+    module.datastream_errors,
+  ]
+}
+
 locals {
   cloudsql_alerts = {
     cpu = {
@@ -686,8 +699,7 @@ resource "google_monitoring_alert_policy" "cloudsql" {
   notification_channels = local.alert_channels
 
   depends_on = [
-    module.cloudsql_error_log, module.cloudsql_slow_queries,
-    module.cloudsql_backup_failures, module.datastream_errors,
+    time_sleep.wait_for_log_metrics,
   ]
 }
 
@@ -717,8 +729,7 @@ resource "google_monitoring_alert_policy" "datastream" {
   notification_channels = local.alert_channels
 
   depends_on = [
-    module.cloudsql_error_log, module.cloudsql_slow_queries,
-    module.cloudsql_backup_failures, module.datastream_errors,
+    time_sleep.wait_for_log_metrics,
   ]
 }
 
@@ -767,7 +778,7 @@ module "dlq_handler_function_service_account" {
   display_name  = "DLQ handler function Service Account"
   project_id    = data.google_project.project.project_id
   member_prefix = "serviceAccount"
-  permissions = []
+  permissions   = []
 }
 
 module "dlq_handler_function" {
